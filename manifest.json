@@ -1,6 +1,6 @@
 {
 	"id": "obsidian-publish-kms",
-	"name": "Publish to KMS",
+	"name": "Publish To EveryWhere",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
 	"description": "Publish Obsidian notes to KMS using md2kms tool",
