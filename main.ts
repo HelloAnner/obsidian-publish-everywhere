@@ -111,7 +111,8 @@ export default class ConfluencePublisher extends Plugin {
 			// Show publishing start message
 			new Notice('⏳ 页面发布中...');
 
-			const command = `"${this.settings.md2kmsPath}" --url "${this.settings.confluenceUrl}" --username "${this.settings.username}" --password "${this.settings.password}" --space "${this.settings.space}" --title "${title}" --parent "${parentId}" "${absoluteFilePath}"`;
+			const escapeSpaces = (str: string) => str.replace(/ /g, '\\ ');
+			const command = `${escapeSpaces(this.settings.md2kmsPath)} --url ${escapeSpaces(this.settings.confluenceUrl)} --username ${escapeSpaces(this.settings.username)} --password ${escapeSpaces(this.settings.password)} --space ${escapeSpaces(this.settings.space)} --title ${escapeSpaces(title)} --parent ${parentId} ${escapeSpaces(absoluteFilePath)}`;
 			console.log('[Publish to Confluence] Executing command:', command.replace(this.settings.password, '********'));
 
 			let processOutput = '';
