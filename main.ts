@@ -150,7 +150,13 @@ export default class ConfluencePublisher extends Plugin {
 			await processPromise;
 
 			// Show success message
-			new Notice(`✅ 已成功创建页面: ${frontmatter.kms}`);
+			const notice = new Notice('✅ 已成功创建页面');
+			notice.noticeEl.createEl('button', {
+				text: '查看页面',
+				cls: 'mod-cta'
+			}).onclick = () => {
+				window.open(frontmatter.kms, '_blank');
+			};
 
 		} catch (error) {
 			// Show error message with the tool's output
