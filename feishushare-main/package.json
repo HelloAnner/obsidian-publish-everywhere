@@ -1,20 +1,15 @@
 {
-	"name": "obsidian-publish-kms",
-	"version": "1.0.0",
-	"description": "Publish Obsidian notes to KMS using md2kms tool",
+	"name": "obsidian-feishu-direct",
+	"version": "2.5.1",
+	"description": "直接分享Markdown文档到飞书，无需代理服务器",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
-		"build": "node node_modules/typescript/lib/tsc.js -noEmit -skipLibCheck && node esbuild.config.mjs production",
+		"build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
 		"version": "node version-bump.mjs && git add manifest.json versions.json"
 	},
-	"keywords": [
-		"obsidian",
-		"kms",
-		"publish",
-		"md2kms"
-	],
-	"author": "Anner Wang",
+	"keywords": [],
+	"author": "",
 	"license": "MIT",
 	"devDependencies": {
 		"@types/node": "^16.11.6",
