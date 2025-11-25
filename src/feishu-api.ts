@@ -1144,7 +1144,8 @@ export class FeishuApiService {
 						if (data.code === 0 && data.data?.items) {
 							const existingNode = data.data.items.find(item => item.title === title);
 							if (existingNode) {
-								const documentUrl = `https://${this.settings.appId.split('-').shift()}.feishu.cn/wiki/${existingNode.obj_token}`;
+                        // 使用 docx URL，便于后续基于 docx API 的更新
+                        const documentUrl = `https://feishu.cn/docx/${existingNode.obj_token}`;
 								Debug.log(`✅ Found existing document: ${documentUrl}`);
 								return { exists: true, documentUrl, documentToken: existingNode.obj_token };
 							}
@@ -2786,22 +2787,33 @@ export class FeishuApiService {
 	/**
 	 * 创建导入任务（带正确的文件夹设置）
 	 */
-	private async createImportTaskWithCorrectFolder(fileToken: string, title: string): Promise<{success: boolean, ticket?: string, error?: string}> {
-		try {
-			// 应用频率控制
-			await this.rateLimitController.throttle('import');
+    private async createImportTaskWithCorrectFolder(fileToken: string, title: string): Promise<{success: boolean, ticket?: string, error?: string}> {
+        try {
+            // 应用频率控制
+            await this.rateLimitController.throttle('import');
 
-			// 使用正确的point格式（与成功版本一致）
-			const importData = {
-				file_extension: 'md',
-				file_token: fileToken,
-				type: 'docx',
-				file_name: title,
-				point: {
-					mount_type: 1, // 1=云空间
-					mount_key: this.settings.defaultFolderId || 'nodcn2EG5YG1i5Rsh5uZs0FsUje' // 使用设置的文件夹或默认根文件夹
-				}
-			};
+            // 使用正确的point格式（与成功版本一致）
+            const importData: any = {
+                file_extension: 'md',
+                file_token: fileToken,
+                type: 'docx',
+                file_name: title
+            };
+
+            // 自动探测挂载点（提升导入成功率）
+            try {
+                let mountKey = this.settings.defaultFolderId || '';
+                if (!mountKey) {
+                    const folders = await this.getFolderList(undefined);
+                    const first = folders?.data?.folders?.[0];
+                    if (first) mountKey = first.token || first.folder_token;
+                }
+                if (mountKey) {
+                    importData.point = { mount_type: 1, mount_key: mountKey };
+                }
+            } catch (e) {
+                // 忽略探测错误，走无 point 的默认导入
+            }
 
 			// 使用配置的文件夹或默认根文件夹
 
@@ -2989,14 +3001,14 @@ export class FeishuApiService {
 	/**
 	 * 将 Markdown 文本渲染为飞书文档块（基础映射：标题/段落/列表/引用/代码）
 	 */
-	private renderMarkdownToBlocks(markdown: string): any[] {
-		const lines = markdown.replace(/\r\n/g, "\n").split("\n");
-		const blocks: any[] = [];
-		let i = 0;
-		let inCode = false;
-		let codeLang = 'markdown';
-		let codeBuffer: string[] = [];
-		let paraBuffer: string[] = [];
+    private renderMarkdownToBlocks(markdown: string): any[] {
+        const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+        const blocks: any[] = [];
+        let i = 0;
+        let inCode = false;
+        let codeLang = 'markdown';
+        let codeBuffer: string[] = [];
+        let paraBuffer: string[] = [];
 
 		const flushParagraph = () => {
 			if (paraBuffer.length === 0) return;
@@ -3019,8 +3031,12 @@ export class FeishuApiService {
 			return { type, field: map[type] };
 		};
 
-		while (i < lines.length) {
-			const line = lines[i];
+        // 简单识别 Markdown 表格（以 | 开头，且包含对齐分隔行）
+        const isTableRow = (s: string) => /^\|.*\|\s*$/.test(s.trim());
+        const isTableSep = (s: string) => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(s.trim());
+
+        while (i < lines.length) {
+            const line = lines[i];
 			// 代码块围栏
 			const fence = line.match(/^```(.*)$/);
 			if (fence) {
@@ -3042,57 +3058,93 @@ export class FeishuApiService {
 
 			if (inCode) { codeBuffer.push(line); i++; continue; }
 
-			// 空行 → 刷段落
-			if (/^\s*$/.test(line)) { flushParagraph(); i++; continue; }
+            // 尝试表格块
+            if (isTableRow(line)) {
+                flushParagraph();
+                const tableLines: string[] = [];
+                tableLines.push(line);
+                i++;
+                // 需要有对齐分隔第二行
+                if (i < lines.length && isTableSep(lines[i])) {
+                    tableLines.push(lines[i]);
+                    i++;
+                    while (i < lines.length && isTableRow(lines[i])) {
+                        tableLines.push(lines[i]);
+                        i++;
+                    }
+                    // 目前飞书未在此实现表格块；将其按文本行合并为若干段落，保留“ | ”分隔，避免丢信息
+                    for (const row of tableLines) {
+                        const rowText = row.replace(/^\||\|$/g, '').trim();
+                        blocks.push({
+                            block_type: 2,
+                            text: { elements: this.parseMarkdownToTextElements(rowText) }
+                        });
+                    }
+                    continue;
+                } else {
+                    // 不是合法表格，回退继续解析（把已取的第一行放回段落）
+                    paraBuffer.push(line.trim());
+                    continue;
+                }
+            }
 
-			// 标题
-			const h = line.match(/^(#{1,6})\s+(.*)$/);
-			if (h) {
-				flushParagraph();
-				const level = h[1].length; const text = h[2];
-				const { type, field } = headingField(level);
-				const b: any = { block_type: type }; b[field] = { elements: [{ text_run: { content: text } }] };
-				blocks.push(b); i++; continue;
-			}
+            // 空行 → 刷段落
+            if (/^\s*$/.test(line)) { flushParagraph(); i++; continue; }
 
-			// 引用
-			const q = line.match(/^>\s?(.*)$/);
-			if (q) {
-				flushParagraph();
-				blocks.push({ block_type: 15, quote: { elements: [{ text_run: { content: q[1] } }] } });
-				i++; continue;
-			}
+            // 标题（带行内样式）
+            const h = line.match(/^(#{1,6})\s+(.*)$/);
+            if (h) {
+                flushParagraph();
+                const level = h[1].length; const text = h[2];
+                const { type, field } = headingField(level);
+                const b: any = { block_type: type }; b[field] = { elements: this.parseMarkdownToTextElements(text) };
+                blocks.push(b); i++; continue;
+            }
 
-			// 待办/无序列表
-			const todo = line.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
-			if (todo) {
-				flushParagraph();
-				blocks.push({ block_type: 17, todo: { elements: [{ text_run: { content: todo[2] } }] } });
-				i++; continue;
-			}
-			const ul = line.match(/^[-*]\s+(.*)$/);
-			if (ul) {
-				flushParagraph();
-				blocks.push({ block_type: 12, bullet: { elements: [{ text_run: { content: ul[1] } }] } });
-				i++; continue;
-			}
+            // 引用（带行内样式）
+            const q = line.match(/^>\s?(.*)$/);
+            if (q) {
+                flushParagraph();
+                blocks.push({ block_type: 15, quote: { elements: this.parseMarkdownToTextElements(q[1]) } });
+                i++; continue;
+            }
 
-			// 有序列表
-			const ol = line.match(/^\d+[.)]\s+(.*)$/);
-			if (ol) {
-				flushParagraph();
-				blocks.push({ block_type: 13, ordered: { elements: [{ text_run: { content: ol[1] } }] } });
-				i++; continue;
-			}
+            // 待办/无序列表（带行内样式）
+            const todo = line.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
+            if (todo) {
+                flushParagraph();
+                blocks.push({ block_type: 17, todo: { elements: this.parseMarkdownToTextElements(todo[2]) } });
+                i++; continue;
+            }
+            const ul = line.match(/^[-*]\s+(.*)$/);
+            if (ul) {
+                flushParagraph();
+                blocks.push({ block_type: 12, bullet: { elements: this.parseMarkdownToTextElements(ul[1]) } });
+                i++; continue;
+            }
 
-			// 其他 → 聚合为段落
-			paraBuffer.push(line.trim());
-			i++;
-		}
+            // 有序列表（带行内样式）
+            const ol = line.match(/^\d+[.)]\s+(.*)$/);
+            if (ol) {
+                flushParagraph();
+                blocks.push({ block_type: 13, ordered: { elements: this.parseMarkdownToTextElements(ol[1]) } });
+                i++; continue;
+            }
 
-		flushParagraph();
-		return blocks;
-	}
+            // 其他 → 聚合为段落（行内样式后续统一 parse）
+            paraBuffer.push(line);
+            i++;
+        }
+
+        // 刷新尾段落，并转换为带行内样式的元素
+        if (paraBuffer.length) {
+            const text = paraBuffer.join(' ').trim();
+            if (text) {
+                blocks.push({ block_type: 2, text: { elements: this.parseMarkdownToTextElements(text) } });
+            }
+        }
+        return blocks;
+    }
 
 	/**
 	 * 将渲染好的块写入指定文档根下（分批追加）
@@ -6376,7 +6428,7 @@ export class FeishuApiService {
 	 * @param feishuUrl 飞书文档URL
 	 * @returns 文档ID，如果解析失败返回null
 	 */
-	extractDocumentIdFromUrl(feishuUrl: string): string | null {
+    extractDocumentIdFromUrl(feishuUrl: string): string | null {
 		try {
 			// 检查缓存
 			if (this.documentIdCache.has(feishuUrl)) {
@@ -6388,11 +6440,12 @@ export class FeishuApiService {
 			Debug.verbose(`🔍 Extracting document ID from URL: ${feishuUrl}`);
 
 			// 支持多种飞书文档URL格式
-			const patterns = [
-				/\/docx\/([a-zA-Z0-9]+)/,  // https://feishu.cn/docx/doxcnXXXXXX
-				/\/docs\/([a-zA-Z0-9]+)/,  // https://feishu.cn/docs/doccnXXXXXX (旧版)
-				/documents\/([a-zA-Z0-9]+)/, // API格式
-			];
+            const patterns = [
+                /\/docx\/([a-zA-Z0-9]+)/,   // https://feishu.cn/docx/doxcnXXXXXX
+                /\/docs\/([a-zA-Z0-9]+)/,   // https://feishu.cn/docs/doccnXXXXXX (旧版)
+                /documents\/([a-zA-Z0-9]+)/, // API格式
+                /\/wiki\/([a-zA-Z0-9]+)/,   // https://{sub}.feishu.cn/wiki/AbCdEfGh （知识库URL，obj_token 与 docx token 一致可用于docx API）
+            ];
 
 			for (const pattern of patterns) {
 				const match = feishuUrl.match(pattern);

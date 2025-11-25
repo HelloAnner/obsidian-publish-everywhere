@@ -137,7 +137,7 @@ async function insertCode(documentId, text){
 function renderMdToBlocks(markdown){
   const lines = markdown.replace(/\r\n/g,"\n").split("\n");
   const blocks=[]; let i=0; let inCode=false; let codeLang='markdown'; let code=[]; let para=[];
-  const flushPara=()=>{ if(para.length){ blocks.push({block_type:2, text:{elements:[{text_run:{content:para.join(' ').trim()}}]}}); para=[]; } };
+  const flushPara=()=>{ if(para.length){ const txt=para.join(' ').trim(); if(txt){ blocks.push({block_type:2, text:{elements: parseInline(txt)}}); } para=[]; } };
   const headingField=(lvl)=>{const type=Math.min(11,Math.max(3,2+lvl)); const map={3:'heading1',4:'heading2',5:'heading3',6:'heading4',7:'heading5',8:'heading6',9:'heading7',10:'heading8',11:'heading9'}; return {type,field:map[type]};};
   while(i<lines.length){ const line=lines[i]; const fence=line.match(/^```(.*)$/);
     if(fence){ if(!inCode){ flushPara(); inCode=true; codeLang=fence[1].trim()||'markdown'; code=[]; } else { blocks.push({block_type:14, code:{language:codeLang, elements:[{text_run:{content:code.join('\n')}}]}}); inCode=false; } i++; continue; }
