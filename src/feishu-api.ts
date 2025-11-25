@@ -765,10 +765,458 @@ export class FeishuApiService {
 	}
 
 	/**
+	 * 解析飞书父页面/父节点URL
+	 * 支持知识库节点URL和云空间文件夹URL两种格式
+	 * @param parentUrl 父页面URL
+	 * @returns 解析结果：空间ID、节点Token或文件夹ID、URL类型
+	 */
+	parseFeishuParentUrl(parentUrl: string): {
+		type: 'wiki' | 'drive';
+		spaceId?: string;
+		nodeToken?: string;
+		folderId?: string;
+		parsed: boolean;
+		error?: string;
+	} {
+		try {
+			const url = new URL(parentUrl);
+
+			// 知识库节点URL格式：https://xxx.feishu.cn/wiki/AbCdEfGh
+			const wikiMatch = url.pathname.match(/\/wiki\/([a-zA-Z0-9]+)/);
+			if (wikiMatch) {
+				const nodeToken = wikiMatch[1];
+				Debug.log(`✅ Parsed wiki node token: ${nodeToken}`);
+				return {
+					type: 'wiki',
+					spaceId: '', // 知识库节点可以通过API获取空间ID
+					nodeToken: nodeToken,
+					parsed: true
+				};
+			}
+
+			// 云空间文件夹URL格式：https://xxx.feishu.cn/drive/folder/AbCdEfGh
+			const folderMatch = url.pathname.match(/\/drive\/folder\/([a-zA-Z0-9]+)/);
+			if (folderMatch) {
+				const folderId = folderMatch[1];
+				Debug.log(`✅ Parsed drive folder ID: ${folderId}`);
+				return {
+					type: 'drive',
+					folderId: folderId,
+					parsed: true
+				};
+			}
+
+			return {
+				type: 'wiki',
+				parsed: false,
+				error: '无法识别的URL格式，请使用知识库页面URL或云空间文件夹URL'
+			};
+		} catch (error) {
+			return {
+				type: 'wiki',
+				parsed: false,
+				error: `URL解析失败: ${error.message}`
+			};
+		}
+	}
+
+	/**
+	 * 获取知识库节点所在的空间ID
+	 * @param nodeToken 知识库节点Token
+	 * @returns 空间ID或null
+	 */
+	async getWikiSpaceIdByNode(nodeToken: string): Promise<string | null> {
+		try {
+			const url = `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${nodeToken}`;
+			const response = await requestUrl({
+				url: url,
+				method: 'GET',
+				headers: {
+					'Authorization': `Bearer ${this.settings.accessToken}`,
+					'Content-Type': 'application/json; charset=utf-8'
+				}
+			});
+
+			if (response.status === 200 && response.json) {
+				const data = response.json;
+				// 部分网关返回在 data.node.space_id / origin_space_id
+				if (data.code === 0) {
+					const node = data.data?.node;
+					const spaceId = node?.space_id || node?.origin_space_id || data.data?.space_id;
+					if (spaceId) return spaceId;
+				}
+			}
+
+			Debug.warn('❌ Failed to get wiki space ID:', response.json?.msg || 'Unknown error');
+			return null;
+		} catch (error) {
+			Debug.error('Get wiki space ID error:', error);
+			return null;
+		}
+	}
+
+	/**
+	 * 持续测试直到找到能返回正确父子关系的API
+	 * @param spaceId 空间ID
+	 * @param parentNodeToken 父节点Token
+	 * @param childTitle 子页面标题
+	 * @returns 验证结果和使用的API信息
+	 */
+	async verifyChildInParentWithRetry(
+		spaceId: string,
+		parentNodeToken: string,
+		childTitle: string
+	): Promise<{ verified: boolean; apiUsed: string; error?: string; child?: any }> {
+		const headers = {
+			'Authorization': `Bearer ${this.settings.accessToken}`,
+			'Content-Type': 'application/json; charset=utf-8'
+		};
+
+		Debug.log(`🔍 STARTING VERIFICATION WITH RETRY: spaceId=${spaceId}, parentNodeToken=${parentNodeToken}, childTitle=${childTitle}`);
+
+		// 测试不同的API端点 (按优先级排序)
+		const testEndpoints = [
+			{
+				name: 'nodes_list_with_parent',
+				url: `https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes`,
+				method: 'GET' as const,
+				params: { page_size: 50, parent_node_token: parentNodeToken }
+			},
+			{
+				name: 'nodes_list',
+				url: `https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes`,
+				method: 'GET' as const,
+				params: { page_size: 50 }
+			}
+		];
+
+		// 逐一测试每个端点
+		for (const endpoint of testEndpoints) {
+			Debug.log(`🔍 TESTING ${endpoint.name}...`);
+			Debug.log(`   URL: ${endpoint.url}`);
+			Debug.log(`   Params: ${JSON.stringify(endpoint.params)}`);
+
+			try {
+				// GET 使用查询参数（部分网关不接受 GET 带 body）
+				const urlObj = new URL(endpoint.url);
+				if (endpoint.params && Object.keys(endpoint.params).length > 0) {
+					for (const [k, v] of Object.entries(endpoint.params)) {
+						urlObj.searchParams.set(k, String(v));
+					}
+				}
+				const response = await requestUrl({
+					url: urlObj.toString(),
+					method: endpoint.method as any,
+					headers: headers
+				});
+
+				const responseText = response.text;
+				let data: any;
+
+				try {
+					data = typeof responseText === 'string' ? JSON.parse(responseText) : responseText;
+				} catch (e) {
+					Debug.error(`❌ ${endpoint.name} JSON parse error:`, e);
+					Debug.log("   Raw response:", responseText.substring(0, 500));
+					continue;
+				}
+
+				Debug.log(`✅ ${endpoint.name} response received`);
+				Debug.log("   Response preview:", JSON.stringify(data).substring(0, 300));
+
+				// 检查响应码
+				if (data.code !== 0 && data.code !== undefined) {
+					Debug.log(`   ❌ API error: ${data.msg} (code: ${data.code})`);
+					continue;
+				}
+
+				// 尝试解析数据结构
+				let items: any[] = [];
+				let structure = 'unknown';
+
+				// 尝试不同的数据结构
+				if (endpoint.name.includes('nodes') || endpoint.name.includes('tree')) {
+					if (data.data) {
+						if (Array.isArray(data.data)) {
+							items = data.data;
+							structure = 'array';
+						} else if (Array.isArray(data.data.items)) {
+							items = data.data.items;
+							structure = 'data.items';
+						} else if (Array.isArray(data.data.nodes)) {
+							items = data.data.nodes;
+							structure = 'data.nodes';
+						} else if (Array.isArray(data.data.children)) {
+							items = data.data.children;
+							structure = 'data.children';
+						} else if (typeof data.data === 'object' && data.data.node) {
+							// 可能是树形结构
+							Debug.log("   🌳 Tree structure detected");
+							const found = this.searchChildInTree(data.data.node, parentNodeToken, childTitle);
+							if (found.found) {
+								Debug.log(`✅ CHILD FOUND IN TREE: ${JSON.stringify(found)}`);
+								return { verified: true, apiUsed: endpoint.name, child: found.child };
+							}
+						}
+					}
+				} else if (endpoint.name.includes('docs')) {
+					if (data.data?.items) {
+						items = data.data.items;
+						structure = 'docs.items';
+					}
+				}
+
+				Debug.log(`   数据结构: ${structure}, 项目数: ${items.length}`);
+
+				// 在返回的数据中查找子节点
+				if (items.length > 0) {
+					Debug.log("   正在查找子节点...");
+					for (const item of items) {
+						// 检查标题匹配
+						const itemTitle = item.title || item.node_title || item.doc_title || '';
+						if (itemTitle === childTitle) {
+							// 检查父节点关联
+							const itemParent = item.parent_node_token || item.parent_wiki_token || item.parent_id || '';
+							if (itemParent === parentNodeToken) {
+								Debug.log(`✅ CHILD FOUND using ${endpoint.name}:`);
+								Debug.log(`   Title: ${itemTitle}`);
+								Debug.log(`   Parent: ${itemParent}`);
+								Debug.log(`   Status: ${item.status || 'active'}`);
+								return { verified: true, apiUsed: endpoint.name, child: item };
+							}
+						}
+					}
+
+					Debug.log("   ❌ Child not found in this endpoint");
+				}
+			} catch (error) {
+				Debug.error(`❌ ${endpoint.name} failed:`, error);
+				Debug.log("   将继续测试下一个端点...");
+			}
+		}
+
+		Debug.error(`❌ ALL ENDPOINTS FAILED - Child not found after all attempts`);
+		return { verified: false, apiUsed: 'all_failed', error: '所有端点都未找到子节点' };
+	}
+
+	/**
+	 * 在树形结构中搜索子节点
+	 */
+	private searchChildInTree(node: any, parentNodeToken: string, childTitle: string): { found: boolean; child?: any } {
+		Debug.log(`🔍 SEARCHING TREE: nodeToken=${node.node_token}, title=${node.title}`);
+
+			// 如果当前节点是父节点，检查其子节点
+			if (node.node_token === parentNodeToken) {
+				Debug.log(`   ✅ Parent node found: ${node.title}`);
+				if (node.children && Array.isArray(node.children)) {
+					for (const child of node.children) {
+						if (child.title === childTitle) {
+							Debug.log(`   ✅ CHILD FOUND: ${child.title}`);
+							return { found: true, child };
+						}
+					}
+				Debug.log(`   父节点下没有找到匹配的子节点`);
+				} else {
+					Debug.log(`   父节点没有 children 字段`);
+				}
+				return { found: false };
+			}
+
+		// 递归搜索子节点
+		if (node.children && Array.isArray(node.children)) {
+			for (const child of node.children) {
+				const result = this.searchChildInTree(child, parentNodeToken, childTitle);
+				if (result.found) {
+					return result;
+				}
+			}
+		}
+
+		return { found: false };
+	}
+
+	/**
+	 * 验证子页面确实在父页面下（通过API查询确认）
+	 * @param spaceId 空间ID
+	 * @param parentNodeToken 父节点Token
+	 * @param childTitle 子页面标题
+	 * @returns 验证结果
+	 */
+	async verifyChildInParent(
+		spaceId: string,
+		parentNodeToken: string,
+		childTitle: string
+	): Promise<boolean> {
+		try {
+			Debug.log(`🔍 VERIFYING CHILD: spaceId=${spaceId}, parentNodeToken=${parentNodeToken}, childTitle=${childTitle}`);
+
+			// 获取知识库节点的子节点列表
+			const url = `https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes`;
+			const response = await requestUrl({
+				url: url,
+				method: 'GET',
+				headers: {
+					'Authorization': `Bearer ${this.settings.accessToken}`,
+					'Content-Type': 'application/json; charset=utf-8'
+				}
+			});
+
+			if (response.status === 200 && response.json) {
+				const data = response.json as WikiNodeListResponse;
+				if (data.code === 0 && data.data?.items) {
+					// 查找父节点下的子节点
+					const children = data.data.items.filter(item =>
+						item.parent_node_token === parentNodeToken
+					);
+
+					Debug.log(`🔍 FOUND ${children.length} CHILDREN under parent`);
+
+					// 查找匹配的子页面
+					const matchingChild = children.find(item => item.title === childTitle);
+
+					if (matchingChild) {
+						Debug.log(`✅ CHILD VERIFIED: title=${matchingChild.title}, token=${matchingChild.obj_token}`);
+						return true;
+					} else {
+						Debug.warn(`⚠️ CHILD NOT FOUND: Expected title="${childTitle}"`);
+						Debug.log(`   Available children:`, children.map(c => ({ title: c.title, token: c.obj_token })));
+						return false;
+					}
+				}
+			}
+
+			Debug.error(`❌ Verification API failed: ${response.json?.msg || 'Unknown error'}`);
+			return false;
+		} catch (error) {
+			Debug.error('Verify child in parent error:', error);
+			return false;
+		}
+	}
+
+	/**
+	 * 检查父位置下是否已存在同名文档
+	 * @param parentInfo 父位置信息
+	 * @param title 文档标题
+	 * @returns 检查结果：是否存在、现有文档信息
+	 */
+	async checkDocumentExistsUnderParent(
+		parentInfo: {
+			type: 'wiki' | 'drive';
+			spaceId?: string;
+			nodeToken?: string;
+			folderId?: string;
+		},
+		title: string
+	): Promise<{
+		exists: boolean;
+		documentUrl?: string;
+		documentToken?: string;
+		error?: string;
+	}> {
+		try {
+			if (parentInfo.type === 'wiki') {
+				// 获取知识库节点的子节点列表
+				const spaceId = parentInfo.spaceId || await this.getWikiSpaceIdByNode(parentInfo.nodeToken!);
+				if (!spaceId || !parentInfo.nodeToken) {
+					return { exists: false, error: '缺少必要的知识库信息' };
+				}
+
+
+				// 逐页查询子节点，最多查 5 页（每页 50 条）
+				let pageToken = '';
+				for (let i = 0; i < 5; i++) {
+					const urlObj = new URL(`https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes`);
+					urlObj.searchParams.set('page_size', '50');
+					urlObj.searchParams.set('parent_node_token', parentInfo.nodeToken!);
+					if (pageToken) urlObj.searchParams.set('page_token', pageToken);
+
+					const response = await requestUrl({
+						url: urlObj.toString(),
+						method: 'GET',
+						headers: {
+							'Authorization': `Bearer ${this.settings.accessToken}`,
+							'Content-Type': 'application/json; charset=utf-8'
+						}
+					});
+
+					if (response.status === 200 && response.json) {
+						const data = response.json as WikiNodeListResponse;
+						if (data.code === 0 && data.data?.items) {
+							const existingNode = data.data.items.find(item => item.title === title);
+							if (existingNode) {
+								const documentUrl = `https://${this.settings.appId.split('-').shift()}.feishu.cn/wiki/${existingNode.obj_token}`;
+								Debug.log(`✅ Found existing document: ${documentUrl}`);
+								return { exists: true, documentUrl, documentToken: existingNode.obj_token };
+							}
+							pageToken = (data as any).data?.page_token || '';
+							if (!pageToken) break;
+						}
+					} else {
+						break;
+					}
+				}
+			} else if (parentInfo.type === 'drive') {
+				// TODO: 云空间文件夹下的文档检查（需要文件夹列表API）
+				Debug.log('⚠️ Drive folder document check not implemented yet');
+			}
+
+			return { exists: false };
+		} catch (error) {
+			Debug.error('Check document exists error:', error);
+			return { exists: false, error: error.message };
+		}
+	}
+
+	/**
+	 * 将文档移动到指定父位置
+	 * @param documentToken 文档Token
+	 * @param parentInfo 父位置信息
+	 */
+	async moveDocumentToParent(
+		documentToken: string,
+		parentInfo: {
+			type: 'wiki' | 'drive';
+			spaceId?: string;
+			nodeToken?: string;
+			folderId?: string;
+		}
+	): Promise<boolean> {
+		try {
+			if (parentInfo.type === 'wiki' && parentInfo.spaceId && parentInfo.nodeToken) {
+				// 将文档移动到知识库节点下
+				const moveResult = await this.moveDocToWiki(
+					parentInfo.spaceId,
+					documentToken,
+					'docx',
+					parentInfo.nodeToken
+				);
+				return moveResult.success;
+			}
+			// 云空间逻辑TODO
+			return false;
+		} catch (error) {
+			Debug.error('Move document error:', error);
+			return false;
+		}
+	}
+
+	/**
 	 * 分享 Markdown 到飞书（带文件处理的完整流程）
 	 * @param isTemporary 是否为临时文档（临时文档不删除源文件）
+	 * @param parentInfo 父位置信息（可选，指定后创建文档后移动到该位置）
 	 */
-	async shareMarkdownWithFiles(title: string, processResult: MarkdownProcessResult, statusNotice?: Notice, isTemporary: boolean = false): Promise<ShareResult> {
+	async shareMarkdownWithFiles(
+		title: string,
+		processResult: MarkdownProcessResult,
+		statusNotice?: Notice,
+		isTemporary: boolean = false,
+		parentInfo?: {
+			type: 'wiki' | 'drive';
+			spaceId?: string;
+			nodeToken?: string;
+			folderId?: string;
+		}
+	): Promise<ShareResult> {
 		try {
 			// 更新状态：检查授权
 			if (statusNotice) {
@@ -787,12 +1235,41 @@ export class FeishuApiService {
 				throw new Error(errorMsg);
 			}
 
-			// 根据目标类型选择不同的分享流程
-			if (this.settings.targetType === 'wiki') {
-				return await this.shareToWiki(title, processResult, statusNotice, isTemporary);
-			} else {
-				return await this.shareToDrive(title, processResult, statusNotice, isTemporary);
+
+			// 自动解析父页面（优先级：Front Matter > 默认父页面URL > 默认父节点设置）
+			let resolvedParent = parentInfo;
+			if (!resolvedParent && this.settings.targetType === 'wiki') {
+				// 1) Front Matter 中的 feishu_parent / feishu.parent / feishu_parent_url
+				const fm = processResult.frontMatter || {} as any;
+				// 兼容多种写法：feishu / feishu_parent / feishu.parent / feishu_parent_url / parent_feishu_url
+				const fmUrl = fm.feishu || fm.feishu_parent || fm['feishu.parent'] || fm.feishu_parent_url || fm.parent_feishu_url;
+				const candidateUrl = (typeof fmUrl === 'string' && fmUrl.trim()) ? fmUrl.trim() : (this.settings.defaultWikiParentUrl || '').trim();
+				if (candidateUrl) {
+					const parsed = this.parseFeishuParentUrl(candidateUrl);
+					if (parsed.parsed && parsed.type === 'wiki' && parsed.nodeToken) {
+						const spaceId = await this.getWikiSpaceIdByNode(parsed.nodeToken);
+						if (spaceId) {
+							resolvedParent = { type: 'wiki', spaceId, nodeToken: parsed.nodeToken };
+						}
+					}
+				}
+				// 2) 退回到旧的默认父节点设置
+				if (!resolvedParent && this.settings.defaultWikiNodeToken) {
+					const spaceId = this.settings.defaultWikiSpaceId || await this.getWikiSpaceIdByNode(this.settings.defaultWikiNodeToken);
+					if (spaceId) {
+						resolvedParent = { type: 'wiki', spaceId, nodeToken: this.settings.defaultWikiNodeToken };
+					}
+				}
 			}
+
+			// 根据目标类型选择不同的分享流程
+			let shareResult = resolvedParent
+				? await this.shareWithParent(title, processResult, resolvedParent, statusNotice, isTemporary)
+				: (this.settings.targetType === 'wiki'
+					? await this.shareToWiki(title, processResult, statusNotice, isTemporary)
+					: await this.shareToDrive(title, processResult, statusNotice, isTemporary));
+
+			return shareResult;
 
 		} catch (error) {
 			Debug.error('Share markdown error:', error);
@@ -808,6 +1285,9 @@ export class FeishuApiService {
 	 */
 	private async shareToDrive(title: string, processResult: MarkdownProcessResult, statusNotice?: Notice, isTemporary: boolean = false): Promise<ShareResult> {
 		try {
+
+				// 预先保存原始Markdown，供兜底写入
+				const rawMarkdownForFallback = processResult.content;
 
 			// 更新状态：开始上传
 			if (statusNotice) {
@@ -834,9 +1314,9 @@ export class FeishuApiService {
 				const cleanTitle = title.endsWith('.md') ? title.slice(0, -3) : title;
 				const importResult = await this.createImportTaskWithCorrectFolder(uploadResult.fileToken, cleanTitle);
 				if (importResult.success && importResult.ticket) {
-					// 第三步：等待导入完成（15秒超时）
-					Debug.log('Step 3: Waiting for import completion (15s timeout)...');
-					const finalResult = await this.waitForImportCompletionWithTimeout(importResult.ticket, 15000);
+					// 第三步：等待导入完成（放宽为60秒），避免大文档超时
+					Debug.log('Step 3: Waiting for import completion (60s timeout)...');
+					const finalResult = await this.waitForImportCompletionWithTimeout(importResult.ticket, 60000);
 					Debug.log(`🔍 IMPORT RESULT DEBUG: success=${finalResult.success}, documentToken=${finalResult.documentToken}`);
 					if (finalResult.success && finalResult.documentToken) {
 						const docUrl = `https://feishu.cn/docx/${finalResult.documentToken}`;
@@ -963,14 +1443,32 @@ export class FeishuApiService {
 	}
 
 	/**
-	 * 分享到知识库（新逻辑）
+	 * 分享到知识库（支持指定父位置）
 	 */
-	private async shareToWiki(title: string, processResult: MarkdownProcessResult, statusNotice?: Notice, isTemporary: boolean = false): Promise<ShareResult> {
+	private async shareToWiki(
+		title: string,
+		processResult: MarkdownProcessResult,
+		statusNotice?: Notice,
+		isTemporary: boolean = false,
+		parentInfo?: {
+			spaceId?: string;
+			nodeToken?: string;
+		}
+	): Promise<ShareResult> {
 		try {
+
+				// 预先保存原始Markdown，供兜底渲染
+				const rawMarkdownForFallback = processResult.content;
 			// 更新状态：开始上传
 			if (statusNotice) {
 				statusNotice.setMessage('📤 正在上传文件到飞书云空间...');
 			}
+
+			// 确定目标空间
+			const targetSpaceId = parentInfo?.spaceId || this.settings.defaultWikiSpaceId;
+			const targetParentToken = parentInfo?.nodeToken || this.settings.defaultWikiNodeToken || undefined;
+
+			Debug.log(`🔍 SHARING TO WIKI: title=${title}, spaceId=${targetSpaceId}, parentNodeToken=${targetParentToken}`);
 
 			// 第一步：先上传到云空间（临时）
 			const uploadResult = await this.uploadMarkdownFile(title, processResult.content);
@@ -996,51 +1494,93 @@ export class FeishuApiService {
 			}
 
 			// 第三步：等待导入完成
-			const finalResult = await this.waitForImportCompletionWithTimeout(importResult.ticket, 15000);
+			// 放宽导入等待至 60s，避免大文档超时
+			const finalResult = await this.waitForImportCompletionWithTimeout(importResult.ticket, 60000);
 
-			if (!finalResult.success || !finalResult.documentToken) {
-				throw new Error('文档导入失败或超时');
-			}
+				if (!finalResult.success || !finalResult.documentToken) {
+					// ⛑️ 兜底：创建空白 Docx 并将 Markdown 渲染为结构化块写入
+					Debug.warn('⚠️ Import failed or timeout, fallback to structured block rendering');
+					const createRes = await this.createEmptyDocument(cleanTitle);
+					if (!createRes.success || !createRes.documentId) {
+						throw new Error('文档导入失败且创建空白文档失败');
+					}
+						const blocks = this.renderMarkdownToBlocks(processResult.content);
+					const ok = await this.writeBlocksToDocument(createRes.documentId, blocks);
+					if (!ok) {
+						// 最后兜底：写为代码块，确保文本不丢
+							// 最后兜底：写为代码块，确保文本不丢
+							await this.insertMarkdownAsCodeBlock(createRes.documentId, processResult.content);
+					}
+					finalResult.success = true;
+					finalResult.documentToken = createRes.documentId;
+				}
 
-			// 第四步：移动到知识库
-			if (statusNotice) {
-				statusNotice.setMessage('📚 正在移动到知识库...');
-			}
+			Debug.log(`🔍 DOCUMENT CREATED: docx_token=${finalResult.documentToken}, title=${cleanTitle}`);
 
-			const moveResult = await this.moveDocToWiki(
-				this.settings.defaultWikiSpaceId,
-				finalResult.documentToken,
-				'docx',
-				this.settings.defaultWikiNodeToken || undefined
-			);
+			// 第四步：移动到知识库（如果有指定父节点）
+			let finalDocumentToken = finalResult.documentToken;
+			let finalUrl = `https://feishu.cn/docx/${finalResult.documentToken}`;
+			let wikiUrl = finalUrl;
+			let moveVerified = false;
 
-			if (!moveResult.success) {
-				// 移动失败，但文档已创建，返回云文档链接作为备选
-				Debug.warn('⚠️ Failed to move to wiki, falling back to cloud document');
-				const docUrl = `https://feishu.cn/docx/${finalResult.documentToken}`;
-				return {
-					success: true,
-					title: cleanTitle,
-					url: docUrl,
-					sourceFileToken: isTemporary ? uploadResult.fileToken : undefined
-				};
+			if (targetParentToken || targetSpaceId !== this.settings.defaultWikiSpaceId) {
+				// 如果有指定父节点或空间，移动到该位置
+				if (statusNotice) {
+					statusNotice.setMessage('📍 正在移动到指定父页面...');
+				}
+
+				Debug.log(`🔍 MOVING TO PARENT: spaceId=${targetSpaceId}, docx_token=${finalDocumentToken}, parent_token=${targetParentToken}`);
+
+				const moveResult = await this.moveDocToWiki(
+					targetSpaceId,
+					finalDocumentToken,
+					'docx',
+					targetParentToken
+				);
+
+				if (moveResult.success) {
+					// 移动成功，生成知识库URL
+					wikiUrl = `https://${this.settings.appId.split('-').shift()}.feishu.cn/wiki/${finalDocumentToken}`;
+					Debug.log(`✅ MOVED TO PARENT: wiki_url=${wikiUrl}`);
+
+					// ✅ 关键验证：通过API查询确认子页面确实在父页面下
+					if (statusNotice) {
+						statusNotice.setMessage('🔍 正在验证子页面...');
+					}
+
+						// 使用新的验证方法，会持续测试不同的API直到找到子页面（需要父节点token）
+						let verification: any = { verified: false, apiUsed: 'skipped', error: 'no parent token' };
+						if (targetParentToken) {
+							verification = await this.verifyChildInParentWithRetry(targetSpaceId, targetParentToken, cleanTitle);
+						}
+
+					if (verification.verified && verification.child) {
+						moveVerified = true;
+						Debug.log(`✅ VERIFIED via ${verification.apiUsed}: Child document confirmed`);
+						Debug.log(`   Child title: ${verification.child.title}`);
+						Debug.log(`   Child token: ${verification.child.obj_token || verification.child.node_token}`);
+
+						if (statusNotice) {
+							statusNotice.setMessage('✅ 子页面验证成功');
+						}
+					} else {
+						Debug.error(`❌ VERIFICATION FAILED via ${verification.apiUsed}: ${verification.error}`);
+						if (statusNotice) {
+							statusNotice.setMessage('❌ 子页面验证失败');
+						}
+					}
+				} else {
+					Debug.warn(`⚠️ Failed to move to parent: ${moveResult.error}`);
+				}
+			} else {
+				Debug.log(`🔍 NO PARENT SPECIFIED, using default location`);
 			}
 
 			// 第五步：处理文件上传（如果有本地文件）
-			let finalDocumentToken = finalResult.documentToken;
-			// 始终使用云文档URL，便于后续更新操作
-			let finalUrl = `https://feishu.cn/docx/${finalResult.documentToken}`;
-
-			// 注意：即使移动到知识库成功，我们仍然保存云文档URL
-			// 这样更新文档时可以直接使用云文档API，避免复杂的知识库URL解析
-
-			// 处理本地文件和 Callout 块上传
 			const hasLocalFiles = processResult.localFiles.length > 0;
 			const hasCalloutBlocks = processResult.calloutBlocks && processResult.calloutBlocks.length > 0;
 
 			Debug.log(`🔍 WIKI MODE DEBUG: hasLocalFiles=${hasLocalFiles}, hasCalloutBlocks=${hasCalloutBlocks}`);
-			Debug.log(`🔍 WIKI MODE DEBUG: localFiles.length=${processResult.localFiles.length}`);
-			Debug.log(`🔍 WIKI MODE DEBUG: calloutBlocks=`, processResult.calloutBlocks);
 
 			if (hasLocalFiles || hasCalloutBlocks) {
 				try {
@@ -1067,7 +1607,6 @@ export class FeishuApiService {
 					}
 				} catch (fileError) {
 					Debug.warn('⚠️ File upload processing failed:', fileError);
-					// 文件上传失败不影响主流程
 				}
 			}
 
@@ -1081,14 +1620,17 @@ export class FeishuApiService {
 					Debug.log('✅ Document share permissions set successfully');
 				} catch (permissionError) {
 					Debug.warn('⚠️ Failed to set document share permissions:', permissionError);
-					// 权限设置失败不影响主流程
 				}
 			}
+
+			// 最终URL：如果使用知识库位置，使用wiki URL
+			const finalReturnUrl = targetParentToken ? wikiUrl : finalUrl;
+			Debug.log(`🔍 FINAL URL: ${finalReturnUrl}`);
 
 			return {
 				success: true,
 				title: cleanTitle,
-				url: finalUrl,
+				url: finalReturnUrl,
 				sourceFileToken: isTemporary ? uploadResult.fileToken : undefined
 			};
 
@@ -1143,7 +1685,7 @@ export class FeishuApiService {
 
 			// 更新状态：转换文档
 			if (statusNotice) {
-				statusNotice.setMessage('🔄 正在转换为飞书文档...');
+					statusNotice.setMessage('🔄 正在转换为飞书文档...（如遇超时将自动兜底写入）');
 			}
 
 			// 第二步：尝试导入任务（15秒超时策略）
@@ -1662,6 +2204,87 @@ export class FeishuApiService {
 	}
 
 	/**
+	 * 带父位置参数的分享方法
+	 * 先检查父位置下是否存在同名文档，存在则更新，不存在则创建并移动
+	 */
+	private async shareWithParent(
+		title: string,
+		processResult: MarkdownProcessResult,
+		parentInfo: {
+			type: 'wiki' | 'drive';
+			spaceId?: string;
+			nodeToken?: string;
+			folderId?: string;
+		},
+		statusNotice?: Notice,
+		isTemporary: boolean = false
+	): Promise<ShareResult> {
+		try {
+			if (statusNotice) {
+				statusNotice.setMessage('🔍 正在检查父页面下是否已存在文档...');
+			}
+
+			// 如果是知识库，需要先获取spaceId
+			let fullParentInfo = { ...parentInfo };
+			if (parentInfo.type === 'wiki' && !parentInfo.spaceId && parentInfo.nodeToken) {
+				const spaceId = await this.getWikiSpaceIdByNode(parentInfo.nodeToken);
+				fullParentInfo.spaceId = spaceId || this.settings.defaultWikiSpaceId || '';
+			}
+
+			// 检查是否已存在同名文档
+			const existsCheck = await this.checkDocumentExistsUnderParent(fullParentInfo, title);
+
+			if (existsCheck.exists && existsCheck.documentToken) {
+				// 已存在，更新现有文档
+				Debug.log(`✅ Document exists, updating: ${existsCheck.documentUrl}`);
+				if (statusNotice) {
+					statusNotice.setMessage('🔄 正在更新现有文档...');
+				}
+
+				const updateResult = await this.updateExistingDocument(
+					existsCheck.documentUrl!,
+					title,
+					processResult,
+					statusNotice
+				);
+
+				return updateResult;
+			} else {
+				// 不存在，先创建到默认位置，再移动到新位置
+				Debug.log('📄 Creating new document and moving to parent location');
+				if (statusNotice) {
+					statusNotice.setMessage('📄 正在创建新文档...');
+				}
+
+				// 创建到新文档
+				const createResult = parentInfo.type === 'wiki'
+					? await this.shareToWiki(title, processResult, statusNotice, isTemporary, {
+							spaceId: fullParentInfo.spaceId,
+							nodeToken: fullParentInfo.nodeToken
+						})
+					: await this.shareToDrive(title, processResult, statusNotice, isTemporary);
+
+				if (createResult.success && createResult.url) {
+					Debug.log(`✅ Document created successfully: ${createResult.url}`);
+					return createResult;
+				} else {
+					Debug.error(`❌ Failed to create document: ${createResult.error}`);
+					return {
+						success: false,
+						error: createResult.error || '文档创建失败'
+					};
+				}
+			}
+		} catch (error) {
+			Debug.error('Share with parent error:', error);
+			return {
+				success: false,
+				error: error.message
+			};
+		}
+	}
+
+	/**
 	 * 将云文档移动到知识库
 	 */
 	async moveDocToWiki(
@@ -1671,6 +2294,8 @@ export class FeishuApiService {
 		parentNodeToken?: string
 	): Promise<{success: boolean, wikiToken?: string, taskId?: string, error?: string}> {
 		try {
+			Debug.log(`🔍 MOVE DOC TO WIKI: spaceId=${spaceId}, objToken=${objToken}, objType=${objType}, parentNodeToken=${parentNodeToken || '(root)'}`);
+
 			// 确保token有效
 			const tokenValid = await this.ensureValidToken();
 			if (!tokenValid) {
@@ -1688,6 +2313,9 @@ export class FeishuApiService {
 				requestData.parent_wiki_token = parentNodeToken;
 			}
 
+			Debug.log(`🔍 REQUEST: POST ${url}`);
+			Debug.log(`🔍 REQUEST BODY: ${JSON.stringify(requestData, null, 2)}`);
+
 			const response = await requestUrl({
 				url: url,
 				method: 'POST',
@@ -1699,14 +2327,17 @@ export class FeishuApiService {
 			});
 
 			const data: MoveDocToWikiResponse = response.json || JSON.parse(response.text);
+			Debug.log(`🔍 RESPONSE: ${JSON.stringify(data, null, 2)}`);
 
 			if (data.code === 0) {
+				Debug.log(`✅ MOVE SUCCESS: wikiToken=${data.data.wiki_token}, taskId=${data.data.task_id}`);
 				return {
 					success: true,
 					wikiToken: data.data.wiki_token,
 					taskId: data.data.task_id
 				};
 			} else {
+				Debug.error(`❌ MOVE FAILED: code=${data.code}, msg=${data.msg}`);
 				return {
 					success: false,
 					error: data.msg || '移动文档到知识库失败'
@@ -2212,7 +2843,8 @@ export class FeishuApiService {
 	 */
 	private async waitForImportCompletionWithTimeout(ticket: string, timeoutMs: number): Promise<{success: boolean, documentToken?: string, error?: string}> {
 		const startTime = Date.now();
-		const maxAttempts = 25;
+		// 放宽等待时长，兼容大文档或导入排队（默认调用处改为 60000ms）
+		const maxAttempts = Math.max(25, Math.ceil(timeoutMs / 1000));
 
 		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
 			const elapsedTime = Date.now() - startTime;
@@ -2283,6 +2915,215 @@ export class FeishuApiService {
 			success: false,
 			error: '导入任务超时'
 		};
+	}
+
+	/**
+	 * 直接创建空白 Docx 文档
+	 */
+	private async createEmptyDocument(title: string): Promise<{success: boolean, documentId?: string, error?: string}> {
+		try {
+			const response = await requestUrl({
+				url: `${FEISHU_CONFIG.BASE_URL}/docx/v1/documents`,
+				method: 'POST',
+				headers: {
+					'Authorization': `Bearer ${this.settings.accessToken}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify({ title })
+			});
+
+			const data = response.json || JSON.parse(response.text);
+			if (data.code === 0 && data.data?.document?.document_id) {
+				return { success: true, documentId: data.data.document.document_id };
+			}
+			return { success: false, error: data.msg || '创建空白文档失败' };
+		} catch (error) {
+			return { success: false, error: (error as Error).message };
+		}
+	}
+
+	/**
+	 * 将原始 Markdown 作为单个代码块写入文档（兜底：确保文本内容完整可读）
+	 */
+	private async insertMarkdownAsCodeBlock(documentId: string, markdownText: string): Promise<{success: boolean, error?: string}> {
+		try {
+			// 获取根块
+			const allBlocks = await this.getAllDocumentBlocks(documentId);
+			const root = allBlocks.find(b => b.block_type === 1);
+			if (!root) return { success: false, error: '未找到根块' };
+
+			// 清空原内容（保险）
+			await this.clearDocumentContent(documentId);
+
+			const requestData = {
+				index: 0,
+				children: [
+					{
+						block_type: 14, // code block
+						code: {
+							language: 'markdown',
+							elements: [ { text_run: { content: markdownText, text_element_style: {} } } ]
+						}
+					}
+				]
+			};
+
+			const response = await requestUrl({
+				url: `${FEISHU_CONFIG.BASE_URL}/docx/v1/documents/${documentId}/blocks/${root.block_id}/children`,
+				method: 'POST',
+				headers: {
+					'Authorization': `Bearer ${this.settings.accessToken}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(requestData)
+			});
+
+			const data = response.json || JSON.parse(response.text);
+			if (data.code === 0) return { success: true };
+			return { success: false, error: data.msg || '写入代码块失败' };
+		} catch (error) {
+			return { success: false, error: (error as Error).message };
+		}
+	}
+
+	/**
+	 * 将 Markdown 文本渲染为飞书文档块（基础映射：标题/段落/列表/引用/代码）
+	 */
+	private renderMarkdownToBlocks(markdown: string): any[] {
+		const lines = markdown.replace(/\r\n/g, "\n").split("\n");
+		const blocks: any[] = [];
+		let i = 0;
+		let inCode = false;
+		let codeLang = 'markdown';
+		let codeBuffer: string[] = [];
+		let paraBuffer: string[] = [];
+
+		const flushParagraph = () => {
+			if (paraBuffer.length === 0) return;
+			const text = paraBuffer.join(' ').trim();
+			if (text) {
+				blocks.push({
+					block_type: 2,
+					text: { elements: [{ text_run: { content: text } }] }
+				});
+			}
+			paraBuffer = [];
+		};
+
+		const headingField = (level: number) => {
+			// block_type: 3..11 对应 heading1..heading9
+			const type = Math.min(11, Math.max(3, 2 + level));
+			const map: Record<number, string> = {
+				3: 'heading1', 4: 'heading2', 5: 'heading3', 6: 'heading4', 7: 'heading5', 8: 'heading6', 9: 'heading7', 10: 'heading8', 11: 'heading9'
+			};
+			return { type, field: map[type] };
+		};
+
+		while (i < lines.length) {
+			const line = lines[i];
+			// 代码块围栏
+			const fence = line.match(/^```(.*)$/);
+			if (fence) {
+				if (!inCode) {
+					flushParagraph();
+					inCode = true;
+					codeLang = fence[1].trim() || 'markdown';
+					codeBuffer = [];
+				} else {
+					// 结束代码块
+					blocks.push({
+						block_type: 14,
+						code: { language: codeLang, elements: [{ text_run: { content: codeBuffer.join('\n') } }] }
+					});
+					inCode = false;
+				}
+				i++; continue;
+			}
+
+			if (inCode) { codeBuffer.push(line); i++; continue; }
+
+			// 空行 → 刷段落
+			if (/^\s*$/.test(line)) { flushParagraph(); i++; continue; }
+
+			// 标题
+			const h = line.match(/^(#{1,6})\s+(.*)$/);
+			if (h) {
+				flushParagraph();
+				const level = h[1].length; const text = h[2];
+				const { type, field } = headingField(level);
+				const b: any = { block_type: type }; b[field] = { elements: [{ text_run: { content: text } }] };
+				blocks.push(b); i++; continue;
+			}
+
+			// 引用
+			const q = line.match(/^>\s?(.*)$/);
+			if (q) {
+				flushParagraph();
+				blocks.push({ block_type: 15, quote: { elements: [{ text_run: { content: q[1] } }] } });
+				i++; continue;
+			}
+
+			// 待办/无序列表
+			const todo = line.match(/^[-*]\s+\[( |x|X)\]\s+(.*)$/);
+			if (todo) {
+				flushParagraph();
+				blocks.push({ block_type: 17, todo: { elements: [{ text_run: { content: todo[2] } }] } });
+				i++; continue;
+			}
+			const ul = line.match(/^[-*]\s+(.*)$/);
+			if (ul) {
+				flushParagraph();
+				blocks.push({ block_type: 12, bullet: { elements: [{ text_run: { content: ul[1] } }] } });
+				i++; continue;
+			}
+
+			// 有序列表
+			const ol = line.match(/^\d+[.)]\s+(.*)$/);
+			if (ol) {
+				flushParagraph();
+				blocks.push({ block_type: 13, ordered: { elements: [{ text_run: { content: ol[1] } }] } });
+				i++; continue;
+			}
+
+			// 其他 → 聚合为段落
+			paraBuffer.push(line.trim());
+			i++;
+		}
+
+		flushParagraph();
+		return blocks;
+	}
+
+	/**
+	 * 将渲染好的块写入指定文档根下（分批追加）
+	 */
+	private async writeBlocksToDocument(documentId: string, blocks: any[]): Promise<boolean> {
+		try {
+			// 获取根块
+			const items = await this.getAllDocumentBlocks(documentId);
+			const root = items.find(b => b.block_type === 1);
+			if (!root) throw new Error('未找到根块');
+			await this.clearDocumentContent(documentId);
+
+			// 分批写入（每批最多 50 个）
+			const chunkSize = 40;
+			for (let start = 0; start < blocks.length; start += chunkSize) {
+				const slice = blocks.slice(start, start + chunkSize);
+				const req = { index: start, children: slice } as any;
+				const response = await requestUrl({
+					url: `${FEISHU_CONFIG.BASE_URL}/docx/v1/documents/${documentId}/blocks/${root.block_id}/children`,
+					method: 'POST',
+					headers: { 'Authorization': `Bearer ${this.settings.accessToken}`, 'Content-Type': 'application/json' },
+					body: JSON.stringify(req)
+				});
+				const data = response.json || JSON.parse(response.text);
+				if (data.code !== 0) throw new Error(data.msg || '追加块失败');
+			}
+			return true;
+		} catch (e) {
+			Debug.error('Write blocks error:', e);
+			return false;
+		}
 	}
 
 	/**

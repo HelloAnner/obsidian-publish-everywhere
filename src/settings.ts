@@ -697,6 +697,20 @@ private startAutoAuth() {
 						this.showWikiSelectModal();
 					});
 			});
+
+		// 新增：默认父页面URL（可直接粘贴 Feishu 知识库链接）
+		new Setting(containerEl)
+			.setName('默认父页面URL（Feishu）')
+			.setDesc('例如：https://your-subdomain.feishu.cn/wiki/AbCdEfGh。优先级：Front Matter > 本字段 > 上方选择的父节点')
+			.addText(text => {
+				text
+					.setPlaceholder('https://example.feishu.cn/wiki/xxxxxxxx')
+					.setValue(this.plugin.settings.defaultWikiParentUrl || '')
+					.onChange(async (value) => {
+						this.plugin.settings.defaultWikiParentUrl = value.trim();
+						await this.plugin.saveSettings();
+					});
+			});
 	}
 
 	/**

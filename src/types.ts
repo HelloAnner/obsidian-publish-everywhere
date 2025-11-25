@@ -69,6 +69,8 @@ export interface FeishuSettings {
 	defaultWikiSpaceName: string;
 	defaultWikiNodeToken: string;
 	defaultWikiNodeName: string;
+	// 新增：默认父页面URL（优先级：FrontMatter > 此URL > 旧的默认token）
+	defaultWikiParentUrl?: string;
 
 	titleSource: TitleSource;
 	frontMatterHandling: FrontMatterHandling;

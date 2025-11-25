@@ -72,7 +72,7 @@ export default class PublishEverywherePlugin extends Plugin {
 	private registerCommands(): void {
 		this.addCommand({
 			id: 'publish-to-confluence',
-			name: 'Publish current note to Confluence',
+			name: '发布到KMS',
 			checkCallback: (checking: boolean) => {
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
@@ -82,55 +82,56 @@ export default class PublishEverywherePlugin extends Plugin {
 					return true;
 				}
 				return false;
-			}
-		});
-
-		this.addCommand({
-			id: 'share-current-note',
-			name: '分享当前笔记到飞书',
-			editorCallback: (editor: Editor, view: MarkdownView) => {
-				this.shareCurrentNote();
-			}
-		});
-
-
-
-		// 添加调试控制命令
-		this.addCommand({
-			id: 'toggle-feishu-debug',
-			name: '🔧 切换飞书调试日志',
-			callback: () => {
-				if (Debug.isEnabled()) {
-					Debug.disable();
-					new Notice('🔇 飞书调试日志已关闭');
-				} else {
-					Debug.enable();
-					new Notice('🔧 飞书调试日志已开启');
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Shift'],
+					key: 'k'
 				}
-			}
+			]
 		});
 
-		// 添加详细日志控制命令
-		// （已移除）详细日志控制命令
-
-		// 添加API测试命令
 		this.addCommand({
-			id: 'test-feishu-api',
-			name: '🧪 测试飞书API连接',
-			callback: async () => {
-				this.log('🧪 Starting API test...');
-				try {
-					const testResult = await this.feishuApi.testApiConnection();
-					this.log(`🧪 API test result: ${JSON.stringify(testResult)}`);
-					new Notice(`API测试结果: ${testResult.success ? '成功' : '失败 - ' + testResult.error}`);
-				} catch (error) {
-					this.log(`🧪 API test error: ${(error as Error).message}`, 'error');
-					new Notice(`API测试错误: ${(error as Error).message}`);
+			id: 'publish-to-feishu',
+			name: '发布到飞书',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+						this.publishCurrentNoteToFeishu(markdownView);
+					}
+					return true;
 				}
-			}
+				return false;
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Shift'],
+					key: 'f'
+				}
+			]
 		});
 
-		// （已移除）日志状态查看命令
+		this.addCommand({
+			id: 'publish-to-all-platforms',
+			name: '🚀 一键发布到所有平台',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+						this.publishToAllPlatforms();
+					}
+					return true;
+				}
+				return false;
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Shift'],
+					key: 'p'
+				}
+			]
+		});
 	}
 
 	/**
@@ -218,6 +219,109 @@ export default class PublishEverywherePlugin extends Plugin {
 		} else {
 			this.log('Invalid OAuth callback parameters', 'warn');
 			new Notice('❌ 无效的授权回调');
+		}
+	}
+
+	/**
+	 * 发布当前笔记到飞书（使用feishu属性指定父页面）
+	 * @param view Markdown视图
+	 */
+	async publishCurrentNoteToFeishu(view: MarkdownView): Promise<void> {
+		const file = view.file;
+		if (!file) {
+			this.log('[Publish to Feishu] No active file', 'error');
+			new Notice('No file is currently open');
+			return;
+		}
+
+		// 检查配置
+		if (!this.settings.appId || !this.settings.appSecret || !this.settings.callbackUrl) {
+			this.log('[Publish to Feishu] Missing Feishu configuration', 'error');
+			new Notice('请先完成飞书配置');
+			return;
+		}
+
+		// 检查frontmatter中的feishu属性
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		if (!frontmatter?.feishu) {
+			this.log('[Publish to Feishu] No Feishu URL in frontmatter', 'error');
+			new Notice('当前笔记缺少 feishu Front Matter 信息');
+			return;
+		}
+
+		// 解析feishu URL
+		const parentUrl = frontmatter.feishu;
+		const parsedParent = this.feishuApi.parseFeishuParentUrl(parentUrl);
+		if (!parsedParent.parsed) {
+			this.log(`[Publish to Feishu] Invalid Feishu URL: ${parsedParent.error}`, 'error');
+			new Notice(`feishu URL格式错误: ${parsedParent.error}`);
+			return;
+		}
+
+		try {
+			const title = file.basename;
+			new Notice('⏳ 正在发布到飞书...');
+
+			// 读取文件内容
+			await this.ensureFileSaved(file);
+			const rawContent = await this.app.vault.read(file);
+
+			// 处理Markdown内容
+			const processResult = this.markdownProcessor.processCompleteWithFiles(
+				rawContent,
+				3, // maxDepth
+				'remove', // frontMatterHandling
+				this.settings.enableSubDocumentUpload,
+				this.settings.enableLocalImageUpload,
+				this.settings.enableLocalAttachmentUpload,
+				this.settings.titleSource,
+				this.settings.codeBlockFilterLanguages || []
+			);
+
+			// 发布到飞书（带父位置）
+			const result = await this.feishuApi.shareMarkdownWithFiles(
+				title,
+				processResult,
+				undefined, // statusNotice
+				false, // isTemporary
+				{
+					type: parsedParent.type,
+					nodeToken: parsedParent.nodeToken,
+					folderId: parsedParent.folderId
+				}
+			);
+
+			if (result.success && result.url) {
+				// 检查是否为更新模式
+				const isUpdateMode = this.checkUpdateMode(processResult.frontMatter);
+
+				// 更新frontmatter
+				if (this.settings.enableShareMarkInFrontMatter) {
+					try {
+						const updatedContent = this.markdownProcessor.addShareMarkToFrontMatter(rawContent, result.url);
+						await this.app.vault.modify(file, updatedContent);
+						this.log('Feishu frontmatter updated');
+					} catch (error) {
+						this.log(`Failed to update frontmatter: ${error.message}`, 'warn');
+					}
+				}
+
+				// 显示成功通知
+				this.showSuccessNotification(result);
+
+				const operation = isUpdateMode.shouldUpdate ? '更新' : '发布';
+				const notice = new Notice(`✅ 成功${operation}到飞书`, 5000);
+				notice.noticeEl.createEl('button', {
+					text: '查看页面',
+					cls: 'mod-cta'
+				}).onclick = () => {
+					window.open(result.url, '_blank');
+				};
+			} else {
+				new Notice(`❌ 发布失败: ${result.error}`);
+			}
+		} catch (error) {
+			this.handleError(error as Error, '发布到飞书');
 		}
 	}
 
@@ -655,6 +759,108 @@ export default class PublishEverywherePlugin extends Plugin {
 		// 这里可以添加token有效性检查和自动刷新逻辑
 		// 暂时简单返回true
 		return true;
+	}
+
+	/**
+	 * 一键发布到所有平台（根据frontmatter中的属性）
+	 */
+	async publishToAllPlatforms(): Promise<void> {
+		this.log('Starting publish to all platforms');
+
+		const activeFile = this.app.workspace.getActiveFile();
+		if (!activeFile) {
+			this.log('No active file found', 'warn');
+			new Notice('❌ 没有打开的笔记');
+			return;
+		}
+
+		if (activeFile.extension !== 'md') {
+			this.log(`Unsupported file type: ${activeFile.extension}`, 'warn');
+			new Notice('❌ 只支持发布 Markdown 文件');
+			return;
+		}
+
+		// 获取frontmatter
+		const frontmatter = this.app.metadataCache.getFileCache(activeFile)?.frontmatter;
+		if (!frontmatter) {
+			new Notice('❌ 当前笔记没有Front Matter信息，无法发布到任何平台');
+			return;
+		}
+
+		// 检查要发布的平台
+		const platforms: string[] = [];
+		if (frontmatter.kms) platforms.push('KMS');
+		if (frontmatter.feishu) platforms.push('飞书');
+
+		if (platforms.length === 0) {
+			new Notice('❌ 当前笔记没有配置任何发布平台（kms 或 feishu）');
+			return;
+		}
+
+		// 开始发布
+		new Notice(`⏳ 开始发布到 ${platforms.join(' 和 ')}...`);
+		this.log(`Publishing to platforms: ${platforms.join(', ')}`);
+
+		const promises: Promise<void>[] = [];
+		const results: { platform: string; success: boolean; error?: string }[] = [];
+
+		// 发布到KMS
+		if (frontmatter.kms) {
+			promises.push(
+				(async () => {
+					try {
+						this.log('Publishing to KMS...');
+						await this.publishCurrentNoteToConfluence(
+							this.app.workspace.getActiveViewOfType(MarkdownView)!
+						);
+						results.push({ platform: 'KMS', success: true });
+					} catch (error) {
+						results.push({
+							platform: 'KMS',
+							success: false,
+							error: error.message
+						});
+					}
+				})()
+			);
+		}
+
+		// 发布到飞书
+		if (frontmatter.feishu) {
+			promises.push(
+				(async () => {
+					try {
+						this.log('Publishing to Feishu...');
+						await this.publishCurrentNoteToFeishu(
+							this.app.workspace.getActiveViewOfType(MarkdownView)!
+						);
+						results.push({ platform: '飞书', success: true });
+					} catch (error) {
+						results.push({
+							platform: '飞书',
+							success: false,
+							error: error.message
+						});
+					}
+				})()
+			);
+		}
+
+		// 等待所有发布完成
+		await Promise.allSettled(promises);
+
+		// 显示结果总结
+		const successCount = results.filter(r => r.success).length;
+		const failCount = results.filter(r => !r.success).length;
+
+		if (failCount === 0) {
+			new Notice(`✅ 成功发布到 ${successCount} 个平台`, 5000);
+		} else {
+			const failedPlatforms = results.filter(r => !r.success).map(r => r.platform).join(', ');
+			const errors = results.filter(r => !r.success).map(r => r.error).join('\n');
+			new Notice(`⚠️ 发布完成：${successCount} 个成功，${failCount} 个失败\n失败平台：${failedPlatforms}`, 8000);
+			this.log(`Publish results - Success: ${successCount}, Failed: ${failCount}`, failCount > 0 ? 'warn' : 'info');
+		}
 	}
 
 	/**

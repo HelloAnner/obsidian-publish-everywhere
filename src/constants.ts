@@ -47,6 +47,8 @@ export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
 	defaultWikiSpaceName: '',
 	defaultWikiNodeToken: '',
 	defaultWikiNodeName: '',
+	// 新增：默认父页面URL
+	defaultWikiParentUrl: '',
 
 	titleSource: 'filename',
 	frontMatterHandling: 'remove',
