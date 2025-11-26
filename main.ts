@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, Menu, Editor, MarkdownView } from 'obsidian';
+import { Plugin, Notice, TFile, Menu, Editor, MarkdownView, requestUrl } from 'obsidian';
 import { exec } from 'child_process';
 import * as path from 'path';
 import { FeishuSettings, ShareResult } from './src/types';
@@ -421,17 +421,85 @@ export default class PublishEverywherePlugin extends Plugin {
 
 			await processPromise;
 
+			let resolvedKmsUrl: string | null = null;
+			try {
+				resolvedKmsUrl = await this.resolveConfluencePageUrl(title, parentId);
+				if (resolvedKmsUrl) {
+					this.log('[Publish to Confluence] Resolved page URL successfully');
+					const rawContent = await this.app.vault.read(file);
+					const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(rawContent, resolvedKmsUrl);
+					if (rawContent !== updatedContent) {
+						await this.app.vault.modify(file, updatedContent);
+						this.log('[Publish to Confluence] kms_url frontmatter updated');
+					}
+				} else {
+					this.log('[Publish to Confluence] Unable to resolve page URL for kms_url update', 'warn');
+				}
+			} catch (error) {
+				this.log(`[Publish to Confluence] Failed to update kms_url: ${(error as Error).message}`, 'warn');
+			}
+
 			const notice = new Notice('✅ 已成功创建页面');
 			notice.noticeEl.createEl('button', {
 				text: '查看页面',
 				cls: 'mod-cta'
 			}).onclick = () => {
-				window.open(frontmatter.kms, '_blank');
+				window.open(resolvedKmsUrl || frontmatter.kms, '_blank');
 			};
 		} catch (error) {
 			const message = (error as Error).message || '发布失败';
 			new Notice(message);
 		}
+	}
+
+	private async resolveConfluencePageUrl(title: string, parentId: string): Promise<string | null> {
+		if (!this.settings.confluenceUrl || !this.settings.space) {
+			return null;
+		}
+
+		try {
+			const baseUrl = this.settings.confluenceUrl.replace(/\/$/, '');
+			const apiUrl = new URL(`${baseUrl}/rest/api/content`);
+			apiUrl.searchParams.set('spaceKey', this.settings.space);
+			apiUrl.searchParams.set('title', title);
+			apiUrl.searchParams.set('expand', 'ancestors');
+
+			const basicToken = Buffer.from(`${this.settings.username}:${this.settings.password}`).toString('base64');
+			const response = await requestUrl({
+				url: apiUrl.toString(),
+				method: 'GET',
+				headers: {
+					'Authorization': `Basic ${basicToken}`,
+					'Accept': 'application/json'
+				}
+			});
+
+			if (response.status < 200 || response.status >= 300) {
+				this.log(`[Publish to Confluence] resolve URL failed with status ${response.status}`, 'warn');
+				return null;
+			}
+
+			const results = response.json?.results;
+			if (!Array.isArray(results) || results.length === 0) {
+				return null;
+			}
+
+			const normalizedParent = parentId.toString();
+			const matchingResult = results.find((item: any) => {
+				if (!item) return false;
+				if (item.title !== title) return false;
+				if (!Array.isArray(item.ancestors)) return false;
+				return item.ancestors.some((ancestor: any) => ancestor?.id === normalizedParent);
+			}) || results[0];
+
+			if (matchingResult?.id) {
+				return `${baseUrl}/pages/viewpage.action?pageId=${matchingResult.id}`;
+			}
+		} catch (error) {
+			this.log(`[Publish to Confluence] resolve URL error: ${(error as Error).message}`, 'warn');
+		}
+
+		return null;
 	}
 
 	/**

@@ -930,4 +930,53 @@ export class MarkdownProcessor {
 		// 重新组合内容
 		return [...frontMatterLines, ...contentLines].join('\n');
 	}
+
+	addOrUpdateKmsUrl(content: string, kmsUrl: string): string {
+		if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
+			const newFrontMatter = [
+				'---',
+				`kms_url: "${kmsUrl}"`,
+				'---',
+				''
+			].join('\n');
+			return newFrontMatter + content;
+		}
+
+		const lines = content.split('\n');
+		let endIndex = -1;
+
+		for (let i = 1; i < lines.length; i++) {
+			if (lines[i].trim() === '---') {
+				endIndex = i;
+				break;
+			}
+		}
+
+		if (endIndex === -1) {
+			return content;
+		}
+
+		const frontMatterLines = lines.slice(0, endIndex + 1);
+		const contentLines = lines.slice(endIndex + 1);
+		let kmsUpdated = false;
+
+		for (let i = 1; i < frontMatterLines.length - 1; i++) {
+			const trimmedLine = frontMatterLines[i].trim();
+			if (!trimmedLine || trimmedLine.startsWith('#')) continue;
+			const colonIndex = trimmedLine.indexOf(':');
+			if (colonIndex === -1) continue;
+			const key = trimmedLine.substring(0, colonIndex).trim();
+			if (key === 'kms_url') {
+				frontMatterLines[i] = `kms_url: "${kmsUrl}"`;
+				kmsUpdated = true;
+				break;
+			}
+		}
+
+		if (!kmsUpdated) {
+			frontMatterLines.splice(frontMatterLines.length - 1, 0, `kms_url: "${kmsUrl}"`);
+		}
+
+		return [...frontMatterLines, ...contentLines].join('\n');
+	}
 }

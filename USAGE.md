@@ -50,6 +50,8 @@ kms: https://kms.fineres.com/pages/viewpage.action?pageId=12345
 内容...
 ```
 
+> 发布成功后，插件会自动在 Front Matter 中补充 / 更新 `kms_url` 字段，方便你直接跳转到最新页面。
+
 ### 仅发布到飞书
 ```markdown
 ---
