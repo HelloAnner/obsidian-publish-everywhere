@@ -67,6 +67,16 @@ export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
 	simpleSuccessNotice: false,
 };
 
+/**
+ * 图片显示相关默认值
+ *
+ * 默认按页面内容区宽度接近 680px 显示，避免过小的缩略图展示。
+ * 注意：飞书文档图片块的宽高以像素为单位；实际显示会按比例缩放以适配页面宽度。
+ */
+export const IMAGE_DISPLAY = {
+    DEFAULT_WIDTH: 680,
+};
+
 export const FEISHU_ERROR_MESSAGES: Record<number, string> = {
 	1061002: '参数错误，请检查文件格式和大小',
 	1061005: '文件大小超出限制',

@@ -153,37 +153,38 @@ export class MarkdownProcessor {
 		});
 	}
 
-	/**
-	 * 处理图片链接
-	 */
-	private processImages(content: string, context?: ProcessContext): string {
-		// 处理本地图片路径，生成占位符
-		return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
-			// 如果是网络图片，保持原样
-			if (src.startsWith('http://') || src.startsWith('https://')) {
-				return match;
-			}
+    /**
+     * 处理图片链接
+     *
+     * 变更说明（2025-11-26）：
+     * - 为了保证“原图、按比例缩放且不至于过小”，现在对网络图片也走占位符上传流程，
+     *   由后续的文件上传逻辑统一下载并上传到飞书，避免飞书导入时生成低分辨率预览。
+     */
+    private processImages(content: string, context?: ProcessContext): string {
+        // 处理图片 `![alt](src)`，本地与网络路径都会生成占位符，后续统一上传至飞书
+        return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+            const shouldUpload = context?.enableLocalImageUpload !== false; // 复用本地图片开关作为“是否上传图片”的总开关
 
-			// 根据设置决定是否处理本地图片
-			if (context?.enableLocalImageUpload !== false) {
-				// 如果是本地图片，生成占位符
-				const placeholder = this.generatePlaceholder();
-				const altText = alt || '图片';
-				const fileInfo: LocalFileInfo = {
-					originalPath: src,
-					fileName: this.extractFileName(src),
-					placeholder: placeholder,
-					isImage: true,
-					altText: altText
-				};
-				this.localFiles.push(fileInfo);
-				return placeholder;
-			} else {
-				// 如果设置禁用了图片上传，保持原有格式
-				return match; // 保持原有的 ![alt](src) 格式
-			}
-		});
-	}
+            if (!shouldUpload) {
+                // 用户关闭上传图片，则保持原样
+                return match;
+            }
+
+            const placeholder = this.generatePlaceholder();
+            const altText = alt || '图片';
+            const fileInfo: LocalFileInfo = {
+                // 支持本地相对/绝对路径，也支持 http(s) 网络图片；
+                // isNetwork 的判断在上传阶段完成（ImageProcessingService.isNetworkImage）。
+                originalPath: src,
+                fileName: this.extractFileName(src),
+                placeholder: placeholder,
+                isImage: true,
+                altText: altText
+            };
+            this.localFiles.push(fileInfo);
+            return placeholder;
+        });
+    }
 
 	/**
 	 * 处理普通链接，确保特殊协议链接保持可点击状态
@@ -458,11 +459,17 @@ export class MarkdownProcessor {
 	/**
 	 * 从路径中提取文件名
 	 */
-	private extractFileName(path: string): string {
-		// 移除路径分隔符，获取文件名
-		const fileName = path.split(/[/\\]/).pop() || path;
-		return fileName;
-	}
+    private extractFileName(path: string): string {
+        // 先移除查询参数与 hash 片段，避免文件名包含 ? 或 #
+        const cleaned = path.split('?')[0].split('#')[0];
+        // 移除路径分隔符，获取文件名
+        let fileName = cleaned.split(/[/\\]/).pop() || cleaned;
+        // 如果没有扩展名，追加通用后缀，提升飞书侧 MIME 识别稳定性
+        if (!fileName.includes('.')) {
+            fileName += '.jpg';
+        }
+        return fileName;
+    }
 
 	/**
 	 * 判断是否为文件引用（有文件扩展名）

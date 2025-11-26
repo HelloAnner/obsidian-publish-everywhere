@@ -18,7 +18,7 @@ import {
 	WikiNodeListResponse,
 	MoveDocToWikiResponse
 } from './types';
-import { FEISHU_CONFIG, FEISHU_ERROR_MESSAGES } from './constants';
+import { FEISHU_CONFIG, FEISHU_ERROR_MESSAGES, IMAGE_DISPLAY } from './constants';
 import { Debug } from './debug';
 import { MarkdownProcessor } from './markdown-processor';
 
@@ -3138,8 +3138,11 @@ export class FeishuApiService {
 				throw new Error('文件信息缺失');
 			}
 
-			const blockType = placeholderBlock.fileInfo.isImage ? 27 : 23; // 27=图片块, 23=文件块
-			const blockContent = placeholderBlock.fileInfo.isImage ? { image: {} } : { file: {} };
+        const blockType = placeholderBlock.fileInfo.isImage ? 27 : 23; // 27=图片块, 23=文件块
+        // 为图片块提供一个合理的默认宽度，避免出现 100px 的过小占位效果；不设置高度以保持原始比例
+        const blockContent = placeholderBlock.fileInfo.isImage
+            ? { image: { width: IMAGE_DISPLAY.DEFAULT_WIDTH } }
+            : { file: {} };
 
 			const requestData = {
 				index: placeholderBlock.index,
@@ -3286,11 +3289,12 @@ export class FeishuApiService {
 	/**
 	 * 设置文件块内容
 	 */
-	private async setFileBlockContent(documentId: string, blockId: string, fileToken: string, isImage: boolean): Promise<void> {
+    private async setFileBlockContent(documentId: string, blockId: string, fileToken: string, isImage: boolean): Promise<void> {
 		try {
-			const requestData = isImage ?
-				{ replace_image: { token: fileToken } } :
-				{ replace_file: { token: fileToken } };
+            const requestData = isImage ?
+                // 同时设置图片显示宽度，保持比例缩放但避免过小
+                { replace_image: { token: fileToken }, image: { width: IMAGE_DISPLAY.DEFAULT_WIDTH } } :
+                { replace_file: { token: fileToken } };
 
 			Debug.log(`🔧 Setting ${isImage ? 'image' : 'file'} block content:`, {
 				documentId,
@@ -6453,20 +6457,21 @@ export class FeishuApiService {
 	 * @param processResult 处理结果，包含本地文件信息
 	 * @returns 图片块数据或占位符文本块
 	 */
-	private buildImageBlockData(sourceBlock: any, processResult?: MarkdownProcessResult): any {
+    private buildImageBlockData(sourceBlock: any, processResult?: MarkdownProcessResult): any {
 		// 对于跨文档复制的图片块，我们需要重新处理
 		// 暂时创建占位符，后续在复制完成后进行图片处理
 		if (sourceBlock.image?.token) {
 			// 这是一个来自其他文档的图片块，token无法跨文档使用
 			// 创建空图片块，后续通过图片处理服务填充
-			return {
-				block_type: 27,
-				image: {
-					width: sourceBlock.image?.width || 100,
-					height: sourceBlock.image?.height || 100,
-					align: sourceBlock.image?.align || 1
-				}
-			};
+            return {
+                block_type: 27,
+                // 提前设定一个合适的显示宽度，避免默认 100px 导致“图片太小”；
+                // 高度不设定以保持原始宽高比，align 保持源对齐方式或默认 1。
+                image: {
+                    width: IMAGE_DISPLAY.DEFAULT_WIDTH,
+                    align: sourceBlock.image?.align || 1
+                }
+            };
 		} else {
 			// 转换为图片占位符文本块
 			return this.imageProcessingService.createImagePlaceholderBlock(sourceBlock);
