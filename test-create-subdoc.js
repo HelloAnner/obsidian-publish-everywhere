@@ -38,10 +38,9 @@ function parseFeishuParentUrl(url) {
 }
 
 // 创建子文档
-async function createSubDocument(parentNodeToken, title, content) {
+async function createSubDocument(parentNodeToken, spaceId, title, content) {
     console.log("\n🚀 开始创建子文档...");
 
-    const spaceId = config.defaultWikiSpaceId;
     const accessToken = config.accessToken;
 
     // 步骤1: 上传Markdown文件到云空间
@@ -347,6 +346,19 @@ function makeApiRequest(url, accessToken, body = {}, method = 'GET') {
     });
 }
 
+async function getSpaceIdByNode(nodeToken, accessToken) {
+    const url = `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${nodeToken}`;
+    try {
+        const response = await makeApiRequest(url, accessToken, {}, 'GET');
+        if (response.code === 0 && response.data?.node) {
+            return response.data.node.space_id || response.data.node.origin_space_id || response.data.space_id || null;
+        }
+    } catch (error) {
+        console.log("❌ 获取空间ID失败:", error.message);
+    }
+    return null;
+}
+
 // 主测试函数
 async function main() {
     console.log("🚀 开始测试子文档创建功能\n");
@@ -361,7 +373,12 @@ async function main() {
     console.log("✅ 父页面信息:");
     console.log("   类型:", parsed.type);
     console.log("   节点Token:", parsed.nodeToken);
-    console.log("   空间ID:", config.defaultWikiSpaceId);
+    const spaceId = await getSpaceIdByNode(parsed.nodeToken, config.accessToken);
+    if (!spaceId) {
+        console.log("❌ 无法获取知识库空间ID");
+        return;
+    }
+    console.log("   空间ID:", spaceId);
 
     // 2. 创建测试子文档
     const testContent = `# ${testChildTitle}
@@ -376,7 +393,7 @@ async function main() {
 
 **加粗文本** 和 *斜体文本*`;
 
-    const result = await createSubDocument(parsed.nodeToken, testChildTitle, testContent);
+    const result = await createSubDocument(parsed.nodeToken, spaceId, testChildTitle, testContent);
 
     if (result.success) {
         console.log("\n🎉 子文档创建成功!");

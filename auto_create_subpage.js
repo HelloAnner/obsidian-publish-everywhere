@@ -33,6 +33,8 @@ const FEISHU = {
   GET_NODE: (spaceId, nodeToken) => `https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes/${nodeToken}`,
   // 列出节点（用于兜底按父节点过滤）
   LIST_NODES: (spaceId) => `https://open.feishu.cn/open-apis/wiki/v2/spaces/${spaceId}/nodes`,
+  // 通过节点 token 获取空间
+  GET_SPACE_BY_NODE: (nodeToken) => `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${nodeToken}`,
 };
 
 // ======== 简易工具 ========
@@ -146,6 +148,23 @@ async function refreshAccessToken() {
   }
   console.log(`❌ 刷新失败: ${resp.data ? (resp.data.msg || resp.data.error_description) : resp.raw?.slice(0, 120)}`);
   return false;
+}
+
+async function getSpaceIdByNode(nodeToken) {
+  const resp = await apiRequest({
+    url: FEISHU.GET_SPACE_BY_NODE(nodeToken),
+    method: 'GET',
+    headers: {
+      Authorization: `Bearer ${config.accessToken}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+  });
+  if (resp.data && resp.data.code === 0) {
+    const node = resp.data.data?.node;
+    return node?.space_id || node?.origin_space_id || resp.data.data?.space_id || null;
+  }
+  console.log('❌ 获取空间ID失败:', resp.data ? resp.data.msg : resp.raw);
+  return null;
 }
 
 // 上传 Markdown 为“素材”
@@ -324,7 +343,11 @@ async function main() {
   const m = parentUrl.match(/https:\/\/([\w-]+)\.feishu\.cn\/wiki\/([A-Za-z0-9]+)/);
   if (!m) { console.log('❌ 父页面URL无法解析'); process.exit(1); }
   const parentNodeToken = m[2];
-  const spaceId = config.defaultWikiSpaceId;
+  const spaceId = await getSpaceIdByNode(parentNodeToken);
+  if (!spaceId) {
+    console.log('❌ 无法根据父页面获取知识库空间ID');
+    process.exit(1);
+  }
 
   // 2) 确保 token 可用（必要时自动刷新）
   logStep('🔑 检查/刷新令牌...');

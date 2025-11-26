@@ -480,7 +480,7 @@ export default class PublishEverywherePlugin extends Plugin {
 			);
 			this.log(`Processing file with title: ${title}`);
 
-			// 检查是否为更新模式（存在feishushare标记）
+			// 检查是否为更新模式（存在 feishu_url 标记）
 			const isUpdateMode = this.checkUpdateMode(processResult.frontMatter);
 			let result: ShareResult;
 			let urlChanged = false;
@@ -682,12 +682,12 @@ export default class PublishEverywherePlugin extends Plugin {
 			return { shouldUpdate: false };
 		}
 
-		// 检查是否存在feishushare标记和feishu_url
-		const hasFeishuShare = frontMatter.feishushare === true || frontMatter.feishushare === 'true';
-		const feishuUrl = frontMatter.feishu_url;
+		// 检查是否存在feishu_url（兼容旧版feishushare标记）
+		const rawUrl = frontMatter.feishu_url;
+		const feishuUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
 
-		if (hasFeishuShare && feishuUrl && typeof feishuUrl === 'string') {
-			this.log(`Found feishushare marker with URL: ${feishuUrl}`);
+		if (feishuUrl) {
+			this.log(`Found Feishu URL marker: ${feishuUrl}`);
 			return {
 				shouldUpdate: true,
 				feishuUrl: feishuUrl

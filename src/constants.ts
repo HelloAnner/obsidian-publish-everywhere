@@ -42,14 +42,6 @@ export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
 	defaultFolderId: '',
 	defaultFolderName: '我的空间',
 
-	// 知识库设置
-	defaultWikiSpaceId: '',
-	defaultWikiSpaceName: '',
-	defaultWikiNodeToken: '',
-	defaultWikiNodeName: '',
-	// 新增：默认父页面URL
-	defaultWikiParentUrl: '',
-
 	titleSource: 'filename',
 	frontMatterHandling: 'remove',
 	// 新增：链接分享默认设置

@@ -120,7 +120,6 @@ tags: [测试, 飞书发布]
 ```markdown
 ---
 title: Feishu 测试父
-feishushare: true
 ---
 
 # Feishu 测试父
@@ -201,7 +200,6 @@ feishu: https://jjspprprpr.feishu.cn/drive/folder/YourFolderToken
 ---
 feishu: https://jjspprprpr.feishu.cn/wiki/KjvMwvinuik94PkzxSActonTnFf?fromScene=spaceOverview
 feishu_url: https://jjspprprpr.feishu.cn/wiki/ChildTokenHere
-feishushare: true
 feishu_shared_at: "2024-11-24 20:05"
 ---
 ```

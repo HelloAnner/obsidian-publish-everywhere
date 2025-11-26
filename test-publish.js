@@ -41,7 +41,6 @@ try {
   const settings = require('./data.json');
   console.log("   AppID:", settings.appId);
   console.log("   目标类型:", settings.targetType);
-  console.log("   默认空间ID:", settings.defaultWikiSpaceId);
   console.log("   AccessToken:", settings.accessToken ? '已设置 ✅' : '未设置 ❌');
   console.log("   RefreshToken:", settings.refreshToken ? '已设置 ✅' : '未设置 ❌');
   console.log("   UserInfo:", settings.userInfo ? `已设置 (${settings.userInfo.name}) ✅` : '未设置 ❌');

@@ -6,12 +6,16 @@ const config = require('./data.json');
 
 // 父页面节点Token
 const parentNodeToken = 'KjvMwvinuik94PkzxSActonTnFf';
-const spaceId = config.defaultWikiSpaceId;
 
 async function checkParentDetails() {
     console.log("🔍 检查父页面详细信息\n");
 
     const accessToken = config.accessToken;
+    const spaceId = await getSpaceIdByNode(parentNodeToken);
+    if (!spaceId) {
+        console.log("❌ 无法获取知识库空间ID，请确认节点Token有效");
+        return;
+    }
 
     // 1. 获取父页面详细信息
     console.log("📄 步骤1: 获取父页面详细信息...");
@@ -164,6 +168,19 @@ function makeApiRequest(url, accessToken, params = {}) {
 
         req.end();
     });
+}
+
+async function getSpaceIdByNode(nodeToken) {
+    const url = `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${nodeToken}`;
+    try {
+        const response = await makeApiRequest(url, config.accessToken);
+        if (response.code === 0 && response.data?.node) {
+            return response.data.node.space_id || response.data.node.origin_space_id || response.data.space_id;
+        }
+    } catch (error) {
+        console.log("❌ 获取空间ID失败:", error.message);
+    }
+    return null;
 }
 
 // 运行检查

@@ -128,7 +128,8 @@ export class MarkdownProcessor {
 	 */
 	private processEmbeds(content: string, context?: ProcessContext): string {
 		// 匹配嵌入语法，生成占位符
-		return content.replace(/!\[\[([^\]]+)\]\]/g, (match, file) => {
+		return content.replace(/!\[\[([^\]]+)\]\]/g, (match, rawTarget) => {
+			const { path: file, width } = this.parseEmbedTarget(rawTarget);
 			// 根据设置决定是否处理文件
 			const isImage = this.isImageFile(file);
 			const shouldProcess = isImage
@@ -142,7 +143,8 @@ export class MarkdownProcessor {
 					fileName: this.extractFileName(file),
 					placeholder: placeholder,
 					isImage: isImage,
-					altText: file
+					altText: file,
+					displayWidth: isImage ? width : undefined
 				};
 				this.localFiles.push(fileInfo);
 				return placeholder;
@@ -158,7 +160,8 @@ export class MarkdownProcessor {
 	 */
 	private processImages(content: string, context?: ProcessContext): string {
 		// 处理本地图片路径，生成占位符
-		return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+		return content.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, rawSrc) => {
+			const { path: src, width } = this.parseImageSource(rawSrc);
 			// 如果是网络图片，保持原样
 			if (src.startsWith('http://') || src.startsWith('https://')) {
 				return match;
@@ -174,7 +177,8 @@ export class MarkdownProcessor {
 					fileName: this.extractFileName(src),
 					placeholder: placeholder,
 					isImage: true,
-					altText: altText
+					altText: altText,
+					displayWidth: width
 				};
 				this.localFiles.push(fileInfo);
 				return placeholder;
@@ -183,6 +187,52 @@ export class MarkdownProcessor {
 				return match; // 保持原有的 ![alt](src) 格式
 			}
 		});
+	}
+
+	private parseEmbedTarget(target: string): { path: string; width?: number } {
+		let path = target.trim();
+		let width: number | undefined;
+		const pipeIndex = path.lastIndexOf('|');
+		if (pipeIndex !== -1) {
+			const potential = path.substring(pipeIndex + 1).trim();
+			const parsedWidth = this.parseDisplayWidth(potential);
+			if (parsedWidth) {
+				width = parsedWidth;
+				path = path.substring(0, pipeIndex).trim();
+			}
+		}
+
+		return { path, width };
+	}
+
+	private parseImageSource(rawSrc: string): { path: string; width?: number } {
+		let path = rawSrc.trim();
+		let width: number | undefined;
+		const pipeIndex = path.lastIndexOf('|');
+		if (pipeIndex !== -1) {
+			const potential = path.substring(pipeIndex + 1).trim();
+			const parsedWidth = this.parseDisplayWidth(potential);
+			if (parsedWidth) {
+				width = parsedWidth;
+				path = path.substring(0, pipeIndex).trim();
+			}
+		}
+		return { path, width };
+	}
+
+	private parseDisplayWidth(value?: string): number | undefined {
+		if (!value) return undefined;
+		const simple = value.match(/^(\d+)(?:px)?$/i);
+		if (simple) {
+			const width = parseInt(simple[1], 10);
+			return width > 0 ? width : undefined;
+		}
+		const ratio = value.match(/^(\d+)\s*x\s*(\d+)(?:px)?$/i);
+		if (ratio) {
+			const width = parseInt(ratio[1], 10);
+			return width > 0 ? width : undefined;
+		}
+		return undefined;
 	}
 
 	/**
@@ -794,18 +844,17 @@ export class MarkdownProcessor {
 		const currentTime = `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
 
 		// 检查是否有Front Matter
-		if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
-			// 没有Front Matter，创建新的
-			const newFrontMatter = [
-				'---',
-				'feishushare: true',
-				`feishu_url: "${shareUrl}"`,
-				`feishu_shared_at: "${currentTime}"`,
-				'---',
-				''
-			].join('\n');
-			return newFrontMatter + content;
-		}
+			if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
+				// 没有Front Matter，创建新的
+				const newFrontMatter = [
+					'---',
+					`feishu_url: "${shareUrl}"`,
+					`feishu_shared_at: "${currentTime}"`,
+					'---',
+					''
+				].join('\n');
+				return newFrontMatter + content;
+			}
 
 		const lines = content.split('\n');
 		let endIndex = -1;
@@ -824,37 +873,46 @@ export class MarkdownProcessor {
 		}
 
 		// 分离Front Matter和内容
-		const frontMatterLines = lines.slice(0, endIndex + 1); // 包含开始和结束的---
-		const contentLines = lines.slice(endIndex + 1);
+			let frontMatterLines = lines.slice(0, endIndex + 1); // 包含开始和结束的---
+			const contentLines = lines.slice(endIndex + 1);
 
-		// 在Front Matter中查找并更新/添加飞书相关字段
-		const fieldsToUpdate: { [key: string]: string } = {
-			'feishushare': 'true',
-			'feishu_url': `"${shareUrl}"`,
-			'feishu_shared_at': `"${currentTime}"`
-		};
+			// 在Front Matter中查找并更新/添加飞书相关字段
+			const fieldsToUpdate: { [key: string]: string } = {
+				'feishu_url': `"${shareUrl}"`,
+				'feishu_shared_at': `"${currentTime}"`
+			};
 
 		// 记录哪些字段已经存在
 		const existingFields = new Set<string>();
 
 		// 遍历Front Matter行，更新已存在的字段
-		for (let i = 1; i < frontMatterLines.length - 1; i++) { // 跳过开始和结束的---
-			const line = frontMatterLines[i];
-			const trimmedLine = line.trim();
+			const processedLines: string[] = [frontMatterLines[0]];
+			for (let i = 1; i < frontMatterLines.length - 1; i++) { // 跳过开始和结束的---
+				const originalLine = frontMatterLines[i];
+				const trimmedLine = originalLine.trim();
 
-			if (trimmedLine && !trimmedLine.startsWith('#')) {
-				const colonIndex = trimmedLine.indexOf(':');
-				if (colonIndex !== -1) {
-					const key = trimmedLine.substring(0, colonIndex).trim();
+				if (trimmedLine && !trimmedLine.startsWith('#')) {
+					const colonIndex = trimmedLine.indexOf(':');
+					if (colonIndex !== -1) {
+						const key = trimmedLine.substring(0, colonIndex).trim();
 
-					if (fieldsToUpdate.hasOwnProperty(key)) {
-						// 更新现有字段
-						frontMatterLines[i] = `${key}: ${fieldsToUpdate[key]}`;
-						existingFields.add(key);
+						if (key === 'feishushare') {
+							// 移除旧的 feishushare 标记
+							continue;
+						}
+
+						if (fieldsToUpdate.hasOwnProperty(key)) {
+							processedLines.push(`${key}: ${fieldsToUpdate[key]}`);
+							existingFields.add(key);
+							continue;
+						}
 					}
 				}
+
+				processedLines.push(originalLine);
 			}
-		}
+			processedLines.push(frontMatterLines[frontMatterLines.length - 1]);
+			frontMatterLines = processedLines;
 
 		// 添加不存在的字段（在最后一个---之前）
 		const newFields: string[] = [];

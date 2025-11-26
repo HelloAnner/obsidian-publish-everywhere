@@ -23,6 +23,17 @@ export type LinkSharePermission = 'tenant_readable' | 'tenant_editable' | 'anyon
 export type TargetType = 'drive' | 'wiki';
 
 /**
+ * 父页面/父文件夹位置信息
+ */
+export interface ParentLocation {
+	type: 'wiki' | 'drive';
+	spaceId?: string;
+	nodeToken?: string;
+	folderId?: string;
+	host?: string;
+}
+
+/**
  * 知识库空间信息
  */
 export interface WikiSpace {
@@ -63,14 +74,6 @@ export interface FeishuSettings {
 	// 云空间设置（原有）
 	defaultFolderId: string;
 	defaultFolderName: string;
-
-	// 知识库设置（新增）
-	defaultWikiSpaceId: string;
-	defaultWikiSpaceName: string;
-	defaultWikiNodeToken: string;
-	defaultWikiNodeName: string;
-	// 新增：默认父页面URL（优先级：FrontMatter > 此URL > 旧的默认token）
-	defaultWikiParentUrl?: string;
 
 	titleSource: TitleSource;
 	frontMatterHandling: FrontMatterHandling;
@@ -219,6 +222,9 @@ export interface LocalFileInfo {
 	isSubDocument?: boolean;  // 新增：标识是否为子文档（双链引用的md文件）
 	isCallout?: boolean;      // 新增：标识是否为 Callout 块
 	altText?: string;
+	displayWidth?: number;    // 新增：图片目标宽度（像素）
+	originalWidth?: number;   // 新增：图片原始宽度
+	originalHeight?: number;  // 新增：图片原始高度
 }
 
 /**

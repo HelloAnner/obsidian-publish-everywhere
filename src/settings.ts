@@ -2,7 +2,6 @@ import { App, PluginSettingTab, Setting, Notice, TextComponent } from 'obsidian'
 import PublishEverywherePlugin from '../main';
 import { ManualAuthModal } from './manual-auth-modal';
 import { FolderSelectModal } from './folder-select-modal';
-import { WikiSelectModal } from './wiki-select-modal';
 
 export class PublishEverywhereSettingTab extends PluginSettingTab {
 	plugin: PublishEverywherePlugin;
@@ -167,7 +166,10 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 
 		// 根据目标类型显示不同的设置
 		if (this.plugin.settings.targetType === 'wiki') {
-			this.addWikiSettings(containerEl);
+			const info = containerEl.createDiv('setting-item-description');
+			info.createEl('strong', { text: '知识库发布说明' });
+			info.createEl('p', { text: '无需在设置中选择固定的知识库。请在每篇笔记的 Front Matter 中添加 `feishu: "https://your.feishu.cn/wiki/xxxxxxxx"`，插件会根据该链接解析父页面并发布到对应的知识库节点。' });
+			info.createEl('p', { text: '如果链接指向云空间（drive/folder），也会自动解析并发布到指定文件夹。' });
 		} else {
 			this.addDriveSettings(containerEl);
 		}
@@ -247,7 +249,7 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 		// 分享标记开关
 		new Setting(containerEl)
 			.setName('自动添加分享标记')
-			.setDesc('分享成功后，自动在笔记的 文档属性（Front Matter） 中添加分享标记（feishushare: true、分享链接和时间）')
+			.setDesc('分享成功后，自动在笔记的 文档属性（Front Matter） 中添加分享链接（feishu_url）与分享时间')
 			.addToggle(toggle => {
 				toggle
 					.setValue(this.plugin.settings.enableShareMarkInFrontMatter)
@@ -680,91 +682,4 @@ private startAutoAuth() {
 	/**
 	 * 添加知识库设置
 	 */
-	private addWikiSettings(containerEl: HTMLElement) {
-		if (!this.plugin.settings.userInfo) return;
-
-		containerEl.createEl('h4', { text: '📚 知识库设置' });
-
-		// 当前知识库位置显示
-		const currentLocation = this.getWikiLocationDescription();
-		new Setting(containerEl)
-			.setName('当前知识库位置')
-			.setDesc(`文档将保存到：${currentLocation}`)
-			.addButton(button => {
-				button
-					.setButtonText('📚 选择知识库位置')
-					.onClick(() => {
-						this.showWikiSelectModal();
-					});
-			});
-
-		// 新增：默认父页面URL（可直接粘贴 Feishu 知识库链接）
-		new Setting(containerEl)
-			.setName('默认父页面URL（Feishu）')
-			.setDesc('例如：https://your-subdomain.feishu.cn/wiki/AbCdEfGh。优先级：Front Matter > 本字段 > 上方选择的父节点')
-			.addText(text => {
-				text
-					.setPlaceholder('https://example.feishu.cn/wiki/xxxxxxxx')
-					.setValue(this.plugin.settings.defaultWikiParentUrl || '')
-					.onChange(async (value) => {
-						this.plugin.settings.defaultWikiParentUrl = value.trim();
-						await this.plugin.saveSettings();
-					});
-			});
-	}
-
-	/**
-	 * 获取知识库位置描述
-	 */
-	private getWikiLocationDescription(): string {
-		const spaceName = this.plugin.settings.defaultWikiSpaceName || '未选择知识库';
-		const nodeName = this.plugin.settings.defaultWikiNodeName;
-
-		if (nodeName) {
-			return `${spaceName} / ${nodeName}`;
-		} else {
-			return `${spaceName} (根目录)`;
-		}
-	}
-
-	/**
-	 * 显示知识库选择模态框
-	 */
-	private async showWikiSelectModal() {
-		try {
-			// 授权前置校验
-			if (!this.plugin.settings.accessToken || !this.plugin.settings.userInfo) {
-				new Notice('❌ 请先在设置中完成飞书授权');
-				return;
-			}
-			const modal = new WikiSelectModal(
-				this.app,
-				this.plugin.feishuApi,
-				async (space, node) => {
-					if (space) {
-						this.plugin.settings.defaultWikiSpaceId = space.space_id;
-						this.plugin.settings.defaultWikiSpaceName = space.name;
-
-						if (node) {
-							this.plugin.settings.defaultWikiNodeToken = node.node_token;
-							this.plugin.settings.defaultWikiNodeName = node.title;
-						} else {
-							this.plugin.settings.defaultWikiNodeToken = '';
-							this.plugin.settings.defaultWikiNodeName = '';
-						}
-
-						await this.plugin.saveSettings();
-						this.plugin.feishuApi.updateSettings(this.plugin.settings);
-						new Notice('✅ 知识库位置已更新');
-						this.display(); // 刷新界面
-					}
-				}
-			);
-
-			modal.open();
-		} catch (error) {
-			import('./debug').then(({ Debug }) => Debug.error('[Feishu Plugin] Failed to open wiki selection modal:', error));
-			new Notice('❌ 打开知识库选择失败');
-		}
-	}
 }

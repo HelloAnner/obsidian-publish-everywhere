@@ -1,4 +1,5 @@
 import { Notice, requestUrl, App, TFile, normalizePath } from 'obsidian';
+import sizeOf from 'image-size';
 import {
 	FeishuSettings,
 	FeishuOAuthResponse,
@@ -16,7 +17,10 @@ import {
 	WikiNode,
 	WikiSpaceListResponse,
 	WikiNodeListResponse,
-	MoveDocToWikiResponse
+	MoveDocToWikiResponse,
+	TargetType,
+	ParentLocation,
+	FrontMatterData
 } from './types';
 import { FEISHU_CONFIG, FEISHU_ERROR_MESSAGES } from './constants';
 import { Debug } from './debug';
@@ -775,11 +779,13 @@ export class FeishuApiService {
 		spaceId?: string;
 		nodeToken?: string;
 		folderId?: string;
+		host?: string;
 		parsed: boolean;
 		error?: string;
 	} {
 		try {
 			const url = new URL(parentUrl);
+			const host = url.host;
 
 			// 知识库节点URL格式：https://xxx.feishu.cn/wiki/AbCdEfGh
 			const wikiMatch = url.pathname.match(/\/wiki\/([a-zA-Z0-9]+)/);
@@ -790,6 +796,7 @@ export class FeishuApiService {
 					type: 'wiki',
 					spaceId: '', // 知识库节点可以通过API获取空间ID
 					nodeToken: nodeToken,
+					host,
 					parsed: true
 				};
 			}
@@ -802,6 +809,7 @@ export class FeishuApiService {
 				return {
 					type: 'drive',
 					folderId: folderId,
+					host,
 					parsed: true
 				};
 			}
@@ -818,6 +826,78 @@ export class FeishuApiService {
 				error: `URL解析失败: ${error.message}`
 			};
 		}
+	}
+
+	/**
+	 * 从 Front Matter 中提取父页面链接
+	 * @param frontMatter Front Matter 数据
+	 */
+	private extractParentLinkFromFrontMatter(frontMatter?: FrontMatterData | null): string | null {
+		if (!frontMatter) return null;
+
+		const candidateKeys = [
+			'feishu',
+			'feishu_parent',
+			'feishu.parent',
+			'feishu_parent_url',
+			'parent_feishu_url',
+			'feishu_parent_link'
+		];
+
+		for (const key of candidateKeys) {
+			const value = frontMatter[key];
+			if (typeof value === 'string' && value.trim()) {
+				return value.trim();
+			}
+		}
+
+		return null;
+	}
+
+	/**
+	 * 根据父页面链接解析位置信息
+	 */
+	private async resolveParentLocationFromUrl(parentUrl: string): Promise<ParentLocation> {
+		const parsed = this.parseFeishuParentUrl(parentUrl);
+		if (!parsed.parsed) {
+			throw new Error(parsed.error || 'URL格式无效');
+		}
+
+		if (parsed.type === 'wiki') {
+			if (!parsed.nodeToken) {
+				throw new Error('知识库链接缺少节点Token');
+			}
+
+			let spaceId: string | undefined = parsed.spaceId;
+			if (!spaceId) {
+				const derivedSpaceId = await this.getWikiSpaceIdByNode(parsed.nodeToken);
+				spaceId = derivedSpaceId || undefined;
+			}
+			if (!spaceId) {
+				throw new Error('无法获取知识库空间 ID，请确认链接有效且拥有访问权限');
+			}
+
+			const resolvedSpaceId = spaceId as string;
+			return {
+				type: 'wiki',
+				nodeToken: parsed.nodeToken,
+				spaceId: resolvedSpaceId,
+				host: parsed.host
+			};
+		}
+
+		if (parsed.type === 'drive') {
+			if (!parsed.folderId) {
+				throw new Error('云空间链接缺少文件夹ID');
+			}
+			return {
+				type: 'drive',
+				folderId: parsed.folderId,
+				host: parsed.host
+			};
+		}
+
+		throw new Error('暂不支持的父页面链接类型');
 	}
 
 	/**
@@ -1100,12 +1180,7 @@ export class FeishuApiService {
 	 * @returns 检查结果：是否存在、现有文档信息
 	 */
 	async checkDocumentExistsUnderParent(
-		parentInfo: {
-			type: 'wiki' | 'drive';
-			spaceId?: string;
-			nodeToken?: string;
-			folderId?: string;
-		},
+		parentInfo: ParentLocation,
 		title: string
 	): Promise<{
 		exists: boolean;
@@ -1175,12 +1250,7 @@ export class FeishuApiService {
 	 */
 	async moveDocumentToParent(
 		documentToken: string,
-		parentInfo: {
-			type: 'wiki' | 'drive';
-			spaceId?: string;
-			nodeToken?: string;
-			folderId?: string;
-		}
+		parentInfo: ParentLocation
 	): Promise<boolean> {
 		try {
 			if (parentInfo.type === 'wiki' && parentInfo.spaceId && parentInfo.nodeToken) {
@@ -1211,12 +1281,7 @@ export class FeishuApiService {
 		processResult: MarkdownProcessResult,
 		statusNotice?: Notice,
 		isTemporary: boolean = false,
-		parentInfo?: {
-			type: 'wiki' | 'drive';
-			spaceId?: string;
-			nodeToken?: string;
-			folderId?: string;
-		}
+		parentInfo?: ParentLocation
 	): Promise<ShareResult> {
 		try {
 			// 更新状态：检查授权
@@ -1237,38 +1302,35 @@ export class FeishuApiService {
 			}
 
 
-			// 自动解析父页面（优先级：Front Matter > 默认父页面URL > 默认父节点设置）
+			// 自动解析父页面：优先使用传入的 parentInfo，其次使用 Front Matter 中的 feishu 链接
 			let resolvedParent = parentInfo;
-			if (!resolvedParent && this.settings.targetType === 'wiki') {
-				// 1) Front Matter 中的 feishu_parent / feishu.parent / feishu_parent_url
-				const fm = processResult.frontMatter || {} as any;
-				// 兼容多种写法：feishu / feishu_parent / feishu.parent / feishu_parent_url / parent_feishu_url
-				const fmUrl = fm.feishu || fm.feishu_parent || fm['feishu.parent'] || fm.feishu_parent_url || fm.parent_feishu_url;
-				const candidateUrl = (typeof fmUrl === 'string' && fmUrl.trim()) ? fmUrl.trim() : (this.settings.defaultWikiParentUrl || '').trim();
+			if (!resolvedParent) {
+				const candidateUrl = this.extractParentLinkFromFrontMatter(processResult.frontMatter);
 				if (candidateUrl) {
-					const parsed = this.parseFeishuParentUrl(candidateUrl);
-					if (parsed.parsed && parsed.type === 'wiki' && parsed.nodeToken) {
-						const spaceId = await this.getWikiSpaceIdByNode(parsed.nodeToken);
-						if (spaceId) {
-							resolvedParent = { type: 'wiki', spaceId, nodeToken: parsed.nodeToken };
-						}
-					}
-				}
-				// 2) 退回到旧的默认父节点设置
-				if (!resolvedParent && this.settings.defaultWikiNodeToken) {
-					const spaceId = this.settings.defaultWikiSpaceId || await this.getWikiSpaceIdByNode(this.settings.defaultWikiNodeToken);
-					if (spaceId) {
-						resolvedParent = { type: 'wiki', spaceId, nodeToken: this.settings.defaultWikiNodeToken };
+					try {
+						resolvedParent = await this.resolveParentLocationFromUrl(candidateUrl);
+					} catch (parseError) {
+						throw new Error(`无法解析 feishu 链接：${parseError.message}`);
 					}
 				}
 			}
 
-			// 根据目标类型选择不同的分享流程
-			let shareResult = resolvedParent
-				? await this.shareWithParent(title, processResult, resolvedParent, statusNotice, isTemporary)
-				: (this.settings.targetType === 'wiki'
-					? await this.shareToWiki(title, processResult, statusNotice, isTemporary)
-					: await this.shareToDrive(title, processResult, statusNotice, isTemporary));
+			const effectiveTarget: TargetType = resolvedParent?.type === 'drive'
+				? 'drive'
+				: (resolvedParent?.type === 'wiki' ? 'wiki' : this.settings.targetType);
+
+			if (effectiveTarget === 'wiki' && (!resolvedParent || resolvedParent.type !== 'wiki')) {
+				throw new Error('请在笔记的 Front Matter 中添加 feishu 链接（例如 feishu: "https://example.feishu.cn/wiki/xxxx"）以指定知识库父页面');
+			}
+
+			let shareResult: ShareResult;
+			if (resolvedParent) {
+				shareResult = await this.shareWithParent(title, processResult, resolvedParent, statusNotice, isTemporary);
+			} else if (effectiveTarget === 'wiki') {
+				throw new Error('缺少知识库父页面信息，无法发布');
+			} else {
+				shareResult = await this.shareToDrive(title, processResult, statusNotice, isTemporary);
+			}
 
 			return shareResult;
 
@@ -1284,7 +1346,13 @@ export class FeishuApiService {
 	/**
 	 * 分享到云空间（原有逻辑）
 	 */
-	private async shareToDrive(title: string, processResult: MarkdownProcessResult, statusNotice?: Notice, isTemporary: boolean = false): Promise<ShareResult> {
+	private async shareToDrive(
+		title: string,
+		processResult: MarkdownProcessResult,
+		statusNotice?: Notice,
+		isTemporary: boolean = false,
+		parentContext?: ParentLocation
+	): Promise<ShareResult> {
 		try {
 
 				// 预先保存原始Markdown，供兜底写入
@@ -1368,7 +1436,7 @@ export class FeishuApiService {
 									if (statusNotice) {
 										statusNotice.setMessage(`📄 正在处理 ${subDocuments.length} 个子文档...`);
 									}
-									await this.processSubDocuments(finalResult.documentToken, subDocuments, statusNotice);
+									await this.processSubDocuments(finalResult.documentToken, subDocuments, statusNotice, parentContext);
 								}
 
 								// 再处理普通文件和 Callout 块
@@ -1451,10 +1519,7 @@ export class FeishuApiService {
 		processResult: MarkdownProcessResult,
 		statusNotice?: Notice,
 		isTemporary: boolean = false,
-		parentInfo?: {
-			spaceId?: string;
-			nodeToken?: string;
-		}
+		parentInfo?: ParentLocation
 	): Promise<ShareResult> {
 		try {
 
@@ -1465,9 +1530,11 @@ export class FeishuApiService {
 				statusNotice.setMessage('📤 正在上传文件到飞书云空间...');
 			}
 
-			// 确定目标空间
-			const targetSpaceId = parentInfo?.spaceId || this.settings.defaultWikiSpaceId;
-			const targetParentToken = parentInfo?.nodeToken || this.settings.defaultWikiNodeToken || undefined;
+			if (!parentInfo?.spaceId) {
+				throw new Error('缺少知识库空间信息，无法发布。请确保提供的 feishu 链接指向有效的知识库页面。');
+			}
+			const targetSpaceId = parentInfo.spaceId;
+			const targetParentToken = parentInfo.nodeToken;
 
 			Debug.log(`🔍 SHARING TO WIKI: title=${title}, spaceId=${targetSpaceId}, parentNodeToken=${targetParentToken}`);
 
@@ -1524,25 +1591,28 @@ export class FeishuApiService {
 			let wikiUrl = finalUrl;
 			let moveVerified = false;
 
-			if (targetParentToken || targetSpaceId !== this.settings.defaultWikiSpaceId) {
-				// 如果有指定父节点或空间，移动到该位置
-				if (statusNotice) {
-					statusNotice.setMessage('📍 正在移动到指定父页面...');
-				}
+			// 将文档移动到目标父节点（知识库发布必需）
+			if (statusNotice) {
+				statusNotice.setMessage('📍 正在移动到指定父页面...');
+			}
 
-				Debug.log(`🔍 MOVING TO PARENT: spaceId=${targetSpaceId}, docx_token=${finalDocumentToken}, parent_token=${targetParentToken}`);
+			Debug.log(`🔍 MOVING TO PARENT: spaceId=${targetSpaceId}, docx_token=${finalDocumentToken}, parent_token=${targetParentToken || '(root)'}`);
 
-				const moveResult = await this.moveDocToWiki(
-					targetSpaceId,
-					finalDocumentToken,
-					'docx',
-					targetParentToken
-				);
+			const moveResult = await this.moveDocToWiki(
+				targetSpaceId,
+				finalDocumentToken,
+				'docx',
+				targetParentToken
+			);
 
 				if (moveResult.success) {
-					// 移动成功，生成知识库URL
-					wikiUrl = `https://${this.settings.appId.split('-').shift()}.feishu.cn/wiki/${finalDocumentToken}`;
-					Debug.log(`✅ MOVED TO PARENT: wiki_url=${wikiUrl}`);
+					const wikiToken = moveResult.wikiToken || finalDocumentToken;
+					const fallbackHost = this.settings.appId
+						? `${this.settings.appId.split('-').shift()}.feishu.cn`
+						: 'feishu.cn';
+					const wikiHost = parentInfo?.host || fallbackHost;
+					wikiUrl = `https://${wikiHost}/wiki/${wikiToken}`;
+				Debug.log(`✅ MOVED TO PARENT: wiki_url=${wikiUrl}`);
 
 					// ✅ 关键验证：通过API查询确认子页面确实在父页面下
 					if (statusNotice) {
@@ -1573,10 +1643,6 @@ export class FeishuApiService {
 				} else {
 					Debug.warn(`⚠️ Failed to move to parent: ${moveResult.error}`);
 				}
-			} else {
-				Debug.log(`🔍 NO PARENT SPECIFIED, using default location`);
-			}
-
 			// 第五步：处理文件上传（如果有本地文件）
 			const hasLocalFiles = processResult.localFiles.length > 0;
 			const hasCalloutBlocks = processResult.calloutBlocks && processResult.calloutBlocks.length > 0;
@@ -1590,12 +1656,17 @@ export class FeishuApiService {
 					const regularFiles = processResult.localFiles.filter(f => !f.isSubDocument);
 
 					// 先处理子文档上传
-					if (subDocuments.length > 0) {
-						if (statusNotice) {
-							statusNotice.setMessage(`📄 正在处理 ${subDocuments.length} 个子文档...`);
+						if (subDocuments.length > 0) {
+							if (statusNotice) {
+								statusNotice.setMessage(`📄 正在处理 ${subDocuments.length} 个子文档...`);
+							}
+							await this.processSubDocuments(
+								finalDocumentToken,
+								subDocuments,
+								statusNotice,
+								parentInfo ? { type: 'wiki', spaceId: parentInfo.spaceId, nodeToken: parentInfo.nodeToken, host: parentInfo.host } : undefined
+							);
 						}
-						await this.processSubDocuments(finalDocumentToken, subDocuments, statusNotice);
-					}
 
 					// 再处理普通文件和 Callout 块
 					if (regularFiles.length > 0 || hasCalloutBlocks) {
@@ -1625,7 +1696,7 @@ export class FeishuApiService {
 			}
 
 			// 最终URL：如果使用知识库位置，使用wiki URL
-			const finalReturnUrl = targetParentToken ? wikiUrl : finalUrl;
+				const finalReturnUrl = wikiUrl;
 			Debug.log(`🔍 FINAL URL: ${finalReturnUrl}`);
 
 			return {
@@ -2211,12 +2282,7 @@ export class FeishuApiService {
 	private async shareWithParent(
 		title: string,
 		processResult: MarkdownProcessResult,
-		parentInfo: {
-			type: 'wiki' | 'drive';
-			spaceId?: string;
-			nodeToken?: string;
-			folderId?: string;
-		},
+		parentInfo: ParentLocation,
 		statusNotice?: Notice,
 		isTemporary: boolean = false
 	): Promise<ShareResult> {
@@ -2225,11 +2291,19 @@ export class FeishuApiService {
 				statusNotice.setMessage('🔍 正在检查父页面下是否已存在文档...');
 			}
 
-			// 如果是知识库，需要先获取spaceId
+			// 如果是知识库，需要确保 spaceId/nodeToken 都就绪
 			let fullParentInfo = { ...parentInfo };
-			if (parentInfo.type === 'wiki' && !parentInfo.spaceId && parentInfo.nodeToken) {
-				const spaceId = await this.getWikiSpaceIdByNode(parentInfo.nodeToken);
-				fullParentInfo.spaceId = spaceId || this.settings.defaultWikiSpaceId || '';
+			if (parentInfo.type === 'wiki') {
+				if (!parentInfo.nodeToken) {
+					throw new Error('缺少知识库父节点信息，请提供有效的知识库页面链接');
+				}
+				if (!parentInfo.spaceId) {
+					const spaceId = await this.getWikiSpaceIdByNode(parentInfo.nodeToken);
+					if (!spaceId) {
+						throw new Error('无法根据父页面获取知识库空间 ID，请确认链接有效且你拥有访问权限');
+					}
+					fullParentInfo.spaceId = spaceId;
+				}
 			}
 
 			// 检查是否已存在同名文档
@@ -2246,7 +2320,8 @@ export class FeishuApiService {
 					existsCheck.documentUrl!,
 					title,
 					processResult,
-					statusNotice
+					statusNotice,
+					fullParentInfo
 				);
 
 				return updateResult;
@@ -2260,10 +2335,12 @@ export class FeishuApiService {
 				// 创建到新文档
 				const createResult = parentInfo.type === 'wiki'
 					? await this.shareToWiki(title, processResult, statusNotice, isTemporary, {
+							type: 'wiki',
 							spaceId: fullParentInfo.spaceId,
-							nodeToken: fullParentInfo.nodeToken
+							nodeToken: fullParentInfo.nodeToken,
+							host: fullParentInfo.host
 						})
-					: await this.shareToDrive(title, processResult, statusNotice, isTemporary);
+					: await this.shareToDrive(title, processResult, statusNotice, isTemporary, fullParentInfo);
 
 				if (createResult.success && createResult.url) {
 					Debug.log(`✅ Document created successfully: ${createResult.url}`);
@@ -4226,6 +4303,55 @@ export class FeishuApiService {
 		}
 	}
 
+	private async adjustImageBlockSize(documentId: string, blockId: string, fileInfo: LocalFileInfo): Promise<void> {
+		if (!fileInfo.displayWidth || fileInfo.displayWidth <= 0) {
+			return;
+		}
+
+		try {
+			let targetWidth = Math.round(fileInfo.displayWidth);
+			if (fileInfo.originalWidth && fileInfo.originalWidth > 0) {
+				targetWidth = Math.min(targetWidth, fileInfo.originalWidth);
+			}
+			if (targetWidth <= 0) {
+				return;
+			}
+
+			const requestData: any = {
+				image: {
+					width: targetWidth
+				}
+			};
+
+			if (fileInfo.originalWidth && fileInfo.originalHeight && fileInfo.originalWidth > 0) {
+				const scale = targetWidth / fileInfo.originalWidth;
+				const scaledHeight = Math.round(fileInfo.originalHeight * scale);
+				if (scaledHeight > 0) {
+					requestData.image.height = scaledHeight;
+				}
+			}
+
+			const response = await requestUrl({
+				url: `${FEISHU_CONFIG.BASE_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
+				method: 'PATCH',
+				headers: {
+					'Authorization': `Bearer ${this.settings.accessToken}`,
+					'Content-Type': 'application/json'
+				},
+				body: JSON.stringify(requestData)
+			});
+
+			const data = response.json || JSON.parse(response.text);
+			if (data.code !== 0) {
+				Debug.warn(`⚠️ Failed to adjust image size for ${fileInfo.fileName}: ${data.msg}`);
+			} else {
+				Debug.log(`📏 Adjusted image width to ${targetWidth}px for block ${blockId}`);
+			}
+		} catch (error) {
+			Debug.warn(`⚠️ adjustImageBlockSize error for ${fileInfo.fileName}:`, error);
+		}
+	}
+
 
 
 	/**
@@ -5084,6 +5210,17 @@ export class FeishuApiService {
 		const fileReadPromises = sortedPlaceholderBlocks.map(async (placeholderBlock) => {
 			try {
 				const fileContent = await this.readLocalFile(placeholderBlock.fileInfo!.originalPath);
+				if (fileContent && placeholderBlock.fileInfo?.isImage) {
+					try {
+						const dimensions = sizeOf(Buffer.from(fileContent));
+						if (dimensions.width && dimensions.height) {
+							placeholderBlock.fileInfo.originalWidth = dimensions.width;
+							placeholderBlock.fileInfo.originalHeight = dimensions.height;
+						}
+					} catch (error) {
+						Debug.warn(`⚠️ Failed to read image dimensions for ${placeholderBlock.fileInfo.fileName}:`, error);
+					}
+				}
 				return { placeholderBlock, fileContent, success: !!fileContent };
 			} catch (error) {
 				Debug.warn(`⚠️ Failed to read file: ${placeholderBlock.fileInfo!.originalPath}`, error);
@@ -5117,6 +5254,9 @@ export class FeishuApiService {
 				const newBlockId = await this.insertFileBlock(documentId, adjustedPlaceholderBlock);
 				const fileToken = await this.uploadFileToDocument(documentId, newBlockId, fileInfo, fileContent!);
 				await this.setFileBlockContent(documentId, newBlockId, fileToken, fileInfo.isImage);
+				if (fileInfo.isImage && fileInfo.displayWidth) {
+					await this.adjustImageBlockSize(documentId, newBlockId, fileInfo);
+				}
 
 				processedBlocks.push(placeholderBlock);
 				Debug.log(`✅ Successfully processed file: ${fileInfo.fileName}`);
@@ -5169,18 +5309,29 @@ export class FeishuApiService {
 				statusNotice.setMessage(`📖 正在并行读取 ${sortedPlaceholderBlocks.length} 个文件...`);
 			}
 
-			const fileReadPromises = sortedPlaceholderBlocks.map(async (placeholderBlock) => {
-				try {
-					if (!placeholderBlock.fileInfo) {
-						throw new Error('File info is missing');
-					}
-					const fileContent = await this.readLocalFile(placeholderBlock.fileInfo.originalPath);
-					return { placeholderBlock, fileContent, success: !!fileContent };
-				} catch (error) {
-					Debug.warn(`⚠️ Failed to read file: ${placeholderBlock.fileInfo?.originalPath || 'unknown'}`, error);
-					return { placeholderBlock, fileContent: null, success: false };
+		const fileReadPromises = sortedPlaceholderBlocks.map(async (placeholderBlock) => {
+			try {
+				if (!placeholderBlock.fileInfo) {
+					throw new Error('File info is missing');
 				}
-			});
+				const fileContent = await this.readLocalFile(placeholderBlock.fileInfo.originalPath);
+				if (fileContent && placeholderBlock.fileInfo.isImage) {
+					try {
+						const dimensions = sizeOf(Buffer.from(fileContent));
+						if (dimensions.width && dimensions.height) {
+							placeholderBlock.fileInfo.originalWidth = dimensions.width;
+							placeholderBlock.fileInfo.originalHeight = dimensions.height;
+						}
+					} catch (error) {
+						Debug.warn(`⚠️ Failed to read image dimensions for ${placeholderBlock.fileInfo.fileName}:`, error);
+					}
+				}
+				return { placeholderBlock, fileContent, success: !!fileContent };
+			} catch (error) {
+				Debug.warn(`⚠️ Failed to read file: ${placeholderBlock.fileInfo?.originalPath || 'unknown'}`, error);
+				return { placeholderBlock, fileContent: null, success: false };
+			}
+		});
 
 			const fileReadResults = await Promise.all(fileReadPromises);
 			const validFiles = fileReadResults.filter(result => result.success);
@@ -5210,9 +5361,12 @@ export class FeishuApiService {
 					Debug.log(`📍 Adjusted insert position for ${fileInfo.fileName}: ${placeholderBlock.index} -> ${adjustedPlaceholderBlock.index}`);
 
 					// 创建文件块并上传文件
-					const newBlockId = await this.insertFileBlock(documentId, adjustedPlaceholderBlock);
-					const fileToken = await this.uploadFileToDocument(documentId, newBlockId, fileInfo, fileContent!);
-					await this.setFileBlockContent(documentId, newBlockId, fileToken, fileInfo.isImage);
+				const newBlockId = await this.insertFileBlock(documentId, adjustedPlaceholderBlock);
+				const fileToken = await this.uploadFileToDocument(documentId, newBlockId, fileInfo, fileContent!);
+				await this.setFileBlockContent(documentId, newBlockId, fileToken, fileInfo.isImage);
+				if (fileInfo.isImage && fileInfo.displayWidth) {
+					await this.adjustImageBlockSize(documentId, newBlockId, fileInfo);
+				}
 
 					processedBlocks.push(placeholderBlock);
 					Debug.log(`✅ Successfully processed file: ${fileInfo.fileName}`);
@@ -5298,7 +5452,12 @@ export class FeishuApiService {
 	/**
 	 * 处理子文档上传
 	 */
-	private async processSubDocuments(parentDocumentId: string, subDocuments: LocalFileInfo[], statusNotice?: Notice): Promise<void> {
+	private async processSubDocuments(
+		parentDocumentId: string,
+		subDocuments: LocalFileInfo[],
+		statusNotice?: Notice,
+		defaultParent?: ParentLocation
+	): Promise<void> {
 		Debug.log(`🚀 Starting sub-document processing for ${subDocuments.length} documents`);
 
 		for (let i = 0; i < subDocuments.length; i++) {
@@ -5458,27 +5617,51 @@ export class FeishuApiService {
 					continue;
 				}
 
-				// 目标为知识库时，确保子文档也移动到知识库对应路径（未配置节点则根目录）
+				// 根据 Front Matter 或默认父级，将子文档移动到对应知识库路径
 				try {
-					if (this.settings.targetType === 'wiki' && this.settings.defaultWikiSpaceId) {
+					let resolvedParent: ParentLocation | null = null;
+					const parentLink = this.extractParentLinkFromFrontMatter(processResult.frontMatter);
+					if (parentLink) {
+						try {
+							resolvedParent = await this.resolveParentLocationFromUrl(parentLink);
+						} catch (parentError) {
+							Debug.warn(`⚠️ Sub-document ${subDoc.fileName} parent link invalid: ${parentError.message}`);
+						}
+					}
+
+					if (!resolvedParent && defaultParent) {
+						resolvedParent = defaultParent;
+					}
+
+						if (resolvedParent?.type === 'wiki') {
+							let targetSpaceId = resolvedParent.spaceId;
+							if (!targetSpaceId && resolvedParent.nodeToken) {
+								const derivedSpaceId = await this.getWikiSpaceIdByNode(resolvedParent.nodeToken);
+								targetSpaceId = derivedSpaceId || undefined;
+							}
+
 						// 获取子文档 token（新建为 subDocResult.documentToken；复用URL时从URL提取）
 						let subDocToken = subDocResult.documentToken;
 						if (!subDocToken && subDocResult.url) {
 							subDocToken = this.extractDocumentIdFromUrl(subDocResult.url) || undefined;
 						}
-						if (subDocToken) {
-							const targetNode = this.settings.defaultWikiNodeToken || undefined;
-							Debug.log(`📚 Moving sub-document to wiki: space=${this.settings.defaultWikiSpaceId}, node=${targetNode || 'root'}`);
+
+						if (targetSpaceId && subDocToken) {
+							Debug.log(`📚 Moving sub-document to wiki: space=${targetSpaceId}, node=${resolvedParent.nodeToken || 'root'}`);
 							await this.moveDocToWiki(
-								this.settings.defaultWikiSpaceId,
+								targetSpaceId,
 								subDocToken,
 								'docx',
-								targetNode
+								resolvedParent.nodeToken
 							);
+						} else {
+							Debug.warn(`⚠️ Unable to determine wiki space or document token for sub-document ${subDoc.fileName}, skip moving`);
 						}
+					} else if (resolvedParent?.type === 'drive') {
+						Debug.log(`📁 Sub-document ${subDoc.fileName} target is drive folder, currently using default drive location`);
 					}
 				} catch (moveError) {
-					Debug.warn(`⚠️ Failed to move sub-document to wiki: ${subDoc.fileName}`, moveError);
+					Debug.warn(`⚠️ Failed to reposition sub-document ${subDoc.fileName}:`, moveError);
 					// 移动失败不影响主流程
 				}
 
@@ -7428,7 +7611,8 @@ export class FeishuApiService {
 		feishuUrl: string,
 		title: string,
 		processResult: MarkdownProcessResult,
-		statusNotice?: Notice
+		statusNotice?: Notice,
+		parentContext?: ParentLocation
 	): Promise<ShareResult> {
 		let tempDocumentId: string | null = null;
 		let tempSourceFileToken: string | null = null; // 临时文档的源文件token
@@ -7538,7 +7722,7 @@ export class FeishuApiService {
 						if (statusNotice) {
 							statusNotice.setMessage(`📄 正在处理 ${subDocuments.length} 个子文档...`);
 						}
-						await this.processSubDocuments(documentId, subDocuments, statusNotice);
+						await this.processSubDocuments(documentId, subDocuments, statusNotice, parentContext);
 					}
 
 					// 再处理普通文件上传

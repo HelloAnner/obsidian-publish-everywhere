@@ -70,6 +70,20 @@ function readTestFile() {
     }
 }
 
+// 根据节点Token获取空间ID
+async function getSpaceIdByNode(nodeToken) {
+    const url = `https://open.feishu.cn/open-apis/wiki/v2/spaces/get_node?token=${nodeToken}`;
+    try {
+        const response = await makeApiRequest(url, config.accessToken);
+        if (response.code === 0 && response.data?.node) {
+            return response.data.node.space_id || response.data.node.origin_space_id || response.data.space_id;
+        }
+    } catch (error) {
+        console.log("❌ 获取空间ID失败:", error.message);
+    }
+    return null;
+}
+
 // 模拟发布流程
 async function simulatePublish() {
     console.log("🚀 开始模拟发布流程\n");
@@ -102,11 +116,17 @@ async function simulatePublish() {
     console.log("✅ 父页面信息:");
     console.log("   类型:", parsed.type);
     console.log("   节点Token:", parsed.nodeToken);
-    console.log("   空间ID:", config.defaultWikiSpaceId);
+
+    const spaceId = await getSpaceIdByNode(parsed.nodeToken);
+    if (!spaceId) {
+        console.log("❌ 无法根据父页面链接获取空间ID");
+        return;
+    }
+    console.log("   空间ID:", spaceId);
 
     // 3. 检查父页面信息
     console.log("\n🔍 步骤3: 检查父页面信息...");
-    const parentInfo = await getParentInfo(parsed.nodeToken, config.defaultWikiSpaceId);
+    const parentInfo = await getParentInfo(parsed.nodeToken, spaceId);
     if (parentInfo) {
         console.log("✅ 父页面信息:");
         console.log("   标题:", parentInfo.title);
@@ -117,7 +137,7 @@ async function simulatePublish() {
 
     // 4. 检查当前子文档
     console.log("\n🔍 步骤4: 检查当前子文档...");
-    const existingChildren = await getChildPages(parsed.nodeToken, config.defaultWikiSpaceId);
+    const existingChildren = await getChildPages(parsed.nodeToken, spaceId);
     console.log(`📄 当前有 ${existingChildren.length} 个子文档:`);
     existingChildren.forEach(child => {
         console.log(`   - ${child.title} (${child.obj_token})`);
@@ -127,7 +147,7 @@ async function simulatePublish() {
     console.log("\n🚀 步骤5: 模拟发布流程...");
     console.log("   发布目标:", fileData.title);
     console.log("   父页面:", parentInfo?.title || parsed.nodeToken);
-    console.log("   空间ID:", config.defaultWikiSpaceId);
+    console.log("   空间ID:", spaceId);
 
     // 6. 发布后验证
     console.log("\n🔍 步骤6: 发布后验证...");
