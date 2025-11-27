@@ -10,6 +10,10 @@ import { CALLOUT_TYPE_MAPPING } from './constants';
 export class MarkdownProcessor {
 	private localFiles: LocalFileInfo[] = [];
 	private calloutBlocks: CalloutInfo[] = [];
+	private highlightIdCounter = 0;
+	private readonly HIGHLIGHT_START_PREFIX = '!!OB_HL_START_';
+	private readonly HIGHLIGHT_END_PREFIX = '!!OB_HL_END_';
+	private readonly DEFAULT_HIGHLIGHT_COLOR = 3; // 飞书默认浅黄色
 	private app: App;
 
 	constructor(app: App) {
@@ -301,10 +305,253 @@ export class MarkdownProcessor {
 	 * 处理 Obsidian 的高亮语法
 	 */
 	private processHighlights(content: string): string {
-		// 处理高亮 ==text==，转换为带有高亮标记的文本
-		return content.replace(/==([^=]+)==/g, (match, text) => {
-			return `<mark>${text}</mark>`; // 使用 HTML mark 标签表示高亮
+		if (!content) {
+			return content;
+		}
+
+		let transformed = content;
+
+		// 处理 <mark> 标签（含颜色样式）
+		const markRegex = /<mark\b([^>]*)>([\s\S]*?)<\/mark>/gi;
+		transformed = transformed.replace(markRegex, (_, attrs, inner) => {
+			return this.wrapHighlightPlaceholder(inner, this.extractHighlightColor(attrs));
 		});
+
+		// 处理 Obsidian 原生 ==text== 语法
+		const equalsRegex = /==([\s\S]+?)==/g;
+		transformed = transformed.replace(equalsRegex, (_, inner) => {
+			return this.wrapHighlightPlaceholder(inner, this.DEFAULT_HIGHLIGHT_COLOR);
+		});
+
+		return transformed;
+	}
+
+	/**
+	 * 将文本包裹为高亮占位符，等待飞书端二次处理
+	 */
+	private wrapHighlightPlaceholder(text: string, color: number = this.DEFAULT_HIGHLIGHT_COLOR): string {
+		const colorValue = Number.isFinite(color) ? color : this.DEFAULT_HIGHLIGHT_COLOR;
+		const highlightId = this.generateHighlightId();
+		const startToken = `${this.HIGHLIGHT_START_PREFIX}${colorValue}_${highlightId}!!`;
+		const endToken = `${this.HIGHLIGHT_END_PREFIX}${highlightId}!!`;
+		return `${startToken}${text}${endToken}`;
+	}
+
+	/**
+	 * 生成唯一的高亮标识，避免占位符冲突
+	 */
+	private generateHighlightId(): string {
+		this.highlightIdCounter += 1;
+		return `${Date.now().toString(36)}_${this.highlightIdCounter.toString(36)}`;
+	}
+
+	/**
+	 * 根据 <mark> 标签属性推断颜色
+	 */
+	private extractHighlightColor(attrText: string): number {
+		if (!attrText) {
+			return this.DEFAULT_HIGHLIGHT_COLOR;
+		}
+
+		const styleMatch = attrText.match(/style\s*=\s*["']([^"']+)["']/i);
+		if (styleMatch) {
+			const styleValue = styleMatch[1];
+			const bgMatch = styleValue.match(/background(?:-color)?\s*:\s*([^;]+)/i);
+			if (bgMatch) {
+				const mapped = this.mapCssColorToFeishu(bgMatch[1].trim());
+				if (mapped) {
+					return mapped;
+				}
+			}
+		}
+
+		const dataColorMatch = attrText.match(/data-color\s*=\s*["']([^"']+)["']/i);
+		if (dataColorMatch) {
+			const mapped = this.mapColorNameToFeishu(dataColorMatch[1].trim().toLowerCase());
+			if (mapped) {
+				return mapped;
+			}
+		}
+
+		return this.DEFAULT_HIGHLIGHT_COLOR;
+	}
+
+	/**
+	 * 将 CSS 颜色值映射为飞书高亮颜色编号
+	 */
+	private mapCssColorToFeishu(colorValue: string): number {
+		if (!colorValue) {
+			return this.DEFAULT_HIGHLIGHT_COLOR;
+		}
+
+		const normalized = colorValue.trim().toLowerCase();
+		const namedColor = this.mapColorNameToFeishu(normalized);
+		if (namedColor) {
+			return namedColor;
+		}
+
+		const hexMatch = normalized.match(/^#([0-9a-f]{3,8})$/i);
+		if (hexMatch) {
+			const rgb = this.parseHexColor(hexMatch[1]);
+			if (rgb) {
+				return this.mapRgbToFeishuColor(rgb.r, rgb.g, rgb.b);
+			}
+		}
+
+		const rgbMatch = normalized.match(/rgba?\(([^)]+)\)/i);
+		if (rgbMatch) {
+			const rgb = this.parseRgbColor(rgbMatch[1]);
+			if (rgb) {
+				return this.mapRgbToFeishuColor(rgb.r, rgb.g, rgb.b);
+			}
+		}
+
+		return this.DEFAULT_HIGHLIGHT_COLOR;
+	}
+
+	/**
+	 * 处理常见的颜色名称
+	 */
+	private mapColorNameToFeishu(name: string): number | null {
+		const map: Record<string, number> = {
+			'yellow': 3,
+			'gold': 3,
+			'orange': 2,
+			'brown': 2,
+			'red': 1,
+			'pink': 1,
+			'magenta': 1,
+			'green': 4,
+			'lime': 4,
+			'teal': 5,
+			'cyan': 5,
+			'blue': 5,
+			'navy': 5,
+			'purple': 6,
+			'violet': 6,
+			'indigo': 6,
+			'gray': 7,
+			'grey': 7,
+			'silver': 7,
+			'white': 7,
+			'black': 7
+		};
+
+		return map[name] ?? null;
+	}
+
+	/**
+	 * HEX 颜色转 RGB
+	 */
+	private parseHexColor(hex: string): { r: number; g: number; b: number } | null {
+		if (!hex) return null;
+		let value = hex;
+		if (value.length === 3 || value.length === 4) {
+			value = value.split('').map(ch => ch + ch).join('');
+		}
+		if (value.length !== 6 && value.length !== 8) {
+			return null;
+		}
+		const r = parseInt(value.substring(0, 2), 16);
+		const g = parseInt(value.substring(2, 4), 16);
+		const b = parseInt(value.substring(4, 6), 16);
+		return { r, g, b };
+	}
+
+	/**
+	 * RGB/ RGBA 字符串转 RGB
+	 */
+	private parseRgbColor(value: string): { r: number; g: number; b: number } | null {
+		const parts = value.split(',').map(part => part.trim());
+		if (parts.length < 3) {
+			return null;
+		}
+
+		const parseComponent = (input: string): number => {
+			if (input.endsWith('%')) {
+				return Math.round(parseFloat(input) * 2.55);
+			}
+			return parseInt(input, 10);
+		};
+
+		const r = Math.min(255, Math.max(0, parseComponent(parts[0])));
+		const g = Math.min(255, Math.max(0, parseComponent(parts[1])));
+		const b = Math.min(255, Math.max(0, parseComponent(parts[2])));
+		return { r, g, b };
+	}
+
+	/**
+	 * RGB 转换为飞书颜色编号
+	 */
+	private mapRgbToFeishuColor(r: number, g: number, b: number): number {
+		const { h, s, l } = this.rgbToHsl(r, g, b);
+		return this.mapHslToFeishuColor(h, s, l);
+	}
+
+	/**
+	 * RGB 转 HSL，方便根据色相分类
+	 */
+	private rgbToHsl(r: number, g: number, b: number): { h: number; s: number; l: number } {
+		const rNorm = r / 255;
+		const gNorm = g / 255;
+		const bNorm = b / 255;
+		const max = Math.max(rNorm, gNorm, bNorm);
+		const min = Math.min(rNorm, gNorm, bNorm);
+		let h = 0;
+		let s = 0;
+		const l = (max + min) / 2;
+
+		const delta = max - min;
+		if (delta !== 0) {
+			s = delta / (1 - Math.abs(2 * l - 1));
+			s = Number.isFinite(s) ? s : 0;
+			s = Math.max(0, Math.min(1, s));
+
+			switch (max) {
+				case rNorm:
+					h = ((gNorm - bNorm) / delta) % 6;
+					break;
+				case gNorm:
+					h = (bNorm - rNorm) / delta + 2;
+					break;
+				default:
+					h = (rNorm - gNorm) / delta + 4;
+			}
+			h *= 60;
+			if (h < 0) {
+				h += 360;
+			}
+		}
+
+		return { h, s, l };
+	}
+
+	/**
+	 * 根据 HSL 归类为飞书支持的背景色编号
+	 */
+	private mapHslToFeishuColor(h: number, s: number, l: number): number {
+		if (s < 0.15 || l > 0.92 || l < 0.12) {
+			return 7; // 更接近灰度
+		}
+		if (h < 15 || h >= 345) {
+			return 1; // 红/粉
+		}
+		if (h < 45) {
+			return 2; // 橙
+		}
+		if (h < 75) {
+			return 3; // 黄
+		}
+		if (h < 170) {
+			return 4; // 绿
+		}
+		if (h < 250) {
+			return 5; // 蓝/青
+		}
+		if (h < 320) {
+			return 6; // 紫
+		}
+		return 1;
 	}
 
 	/**
@@ -350,7 +597,8 @@ export class MarkdownProcessor {
 					return true;
 				});
 
-			const calloutContent = processedLines.join('\n');
+			let calloutContent = processedLines.join('\n');
+			calloutContent = this.processHighlights(calloutContent);
 
 			// 生成占位符
 			const placeholder = this.generatePlaceholder();
@@ -464,9 +712,10 @@ export class MarkdownProcessor {
 		titleSource: 'filename' | 'frontmatter' = 'filename',
 		codeBlockFilterLanguages: string[] = []
 	): MarkdownProcessResult {
-		// 重置本地文件列表和 Callout 列表
+		// 重置本地文件和结构化占位符
 		this.localFiles = [];
 		this.calloutBlocks = [];
+		this.highlightIdCounter = 0;
 
 		// 处理 Front Matter
 		const { content: processedContent, frontMatter } = this.processFrontMatter(content, frontMatterHandling);

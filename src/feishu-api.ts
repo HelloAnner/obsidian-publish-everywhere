@@ -521,6 +521,23 @@ export class FeishuApiService {
 	private rateLimitController: RateLimitController;
 	private imageProcessingService: ImageProcessingService;
 	private refreshPromise: Promise<boolean> | null = null; // 防止并发刷新
+	private readonly HIGHLIGHT_START_FLAG = '!!OB_HL_START_';
+	private readonly HIGHLIGHT_END_FLAG = '!!OB_HL_END_';
+	private readonly DEFAULT_HIGHLIGHT_COLOR = 3;
+
+	/**
+	 * 飞书高亮颜色 CSS 类名映射
+	 * 基于飞书实际的 CSS 类名实现
+	 */
+	private readonly HIGHLIGHT_COLOR_CLASSES = {
+		1: 'text-highlight-background-red-light-bg',      // 红色
+		2: 'text-highlight-background-orange-light-bg',   // 橙色
+		3: 'text-highlight-background-yellow-light-bg',   // 黄色（默认）
+		4: 'text-highlight-background-green-light-bg',    // 绿色
+		5: 'text-highlight-background-blue-light-bg',     // 蓝色
+		6: 'text-highlight-background-purple-light-bg',   // 紫色
+		7: 'text-highlight-background-gray-light-bg'      // 灰色
+	};
 
 	constructor(settings: FeishuSettings, app: App) {
 		this.settings = settings;
@@ -1355,8 +1372,9 @@ export class FeishuApiService {
 	): Promise<ShareResult> {
 		try {
 
-				// 预先保存原始Markdown，供兜底写入
-				const rawMarkdownForFallback = processResult.content;
+			// 预先保存原始Markdown，供兜底写入
+			const rawMarkdownForFallback = processResult.content;
+			const hasHighlightPlaceholders = this.containsHighlightPlaceholders(processResult);
 
 			// 更新状态：开始上传
 			if (statusNotice) {
@@ -1454,7 +1472,16 @@ export class FeishuApiService {
 							}
 						}
 
-						// 第六步：源文件自动删除
+					// 第六步：高亮占位符转换
+					if (hasHighlightPlaceholders && finalResult.documentToken) {
+						try {
+							await this.processHighlightPlaceholders(finalResult.documentToken, statusNotice);
+						} catch (highlightError) {
+							Debug.warn('⚠️ Highlight post-processing failed:', highlightError);
+						}
+					}
+
+					// 第七步：源文件自动删除
 						// 注意：使用素材上传API，导入完成后源文件会自动被删除
 						Debug.log(`📝 Source file will be automatically deleted by Feishu after import: ${uploadResult.fileToken}`);
 
@@ -1523,8 +1550,9 @@ export class FeishuApiService {
 	): Promise<ShareResult> {
 		try {
 
-				// 预先保存原始Markdown，供兜底渲染
-				const rawMarkdownForFallback = processResult.content;
+			// 预先保存原始Markdown，供兜底渲染
+			const rawMarkdownForFallback = processResult.content;
+			const hasHighlightPlaceholders = this.containsHighlightPlaceholders(processResult);
 			// 更新状态：开始上传
 			if (statusNotice) {
 				statusNotice.setMessage('📤 正在上传文件到飞书云空间...');
@@ -1692,6 +1720,15 @@ export class FeishuApiService {
 					Debug.log('✅ Document share permissions set successfully');
 				} catch (permissionError) {
 					Debug.warn('⚠️ Failed to set document share permissions:', permissionError);
+				}
+			}
+
+			// 高亮：处理占位符为飞书样式
+			if (hasHighlightPlaceholders && finalDocumentToken) {
+				try {
+					await this.processHighlightPlaceholders(finalDocumentToken, statusNotice);
+				} catch (highlightError) {
+					Debug.warn('⚠️ Highlight post-processing failed in wiki mode:', highlightError);
 				}
 			}
 
@@ -3702,6 +3739,22 @@ export class FeishuApiService {
 	}
 
 	/**
+	 * 判断当前处理结果是否包含高亮占位符
+	 */
+	private containsHighlightPlaceholders(processResult: MarkdownProcessResult | null | undefined): boolean {
+		if (!processResult) {
+			return false;
+		}
+		if (processResult.content && processResult.content.includes(this.HIGHLIGHT_START_FLAG)) {
+			return true;
+		}
+		if (processResult.calloutBlocks && processResult.calloutBlocks.some(block => block.content.includes(this.HIGHLIGHT_START_FLAG))) {
+			return true;
+		}
+		return false;
+	}
+
+	/**
 	 * 转义正则表达式特殊字符
 	 */
 	private escapeRegExp(string: string): string {
@@ -5665,8 +5718,10 @@ export class FeishuApiService {
 					// 移动失败不影响主流程
 				}
 
+				const shouldProcessContent = !existingUrl || urlChanged;
+
 				// 只有在创建新文档时才处理本地文件（复用URL时不需要处理）
-				if (!existingUrl || urlChanged) {
+				if (shouldProcessContent) {
 					// 处理子文档内部的本地文件（图片、附件等）
 					if (processResult.localFiles.length > 0 && subDocResult.documentToken) {
 						try {
@@ -5682,9 +5737,10 @@ export class FeishuApiService {
 					Debug.log(`📋 Skipping file processing for sub-document with existing URL: ${subDoc.fileName}`);
 				}
 
+				const targetDocToken = subDocResult.documentToken || (subDocResult.url ? this.extractDocumentIdFromUrl(subDocResult.url) || undefined : undefined);
+
 				// 无论新建还是复用URL，都需要处理子文档内的 Callout 占位符替换
 				try {
-					const targetDocToken = subDocResult.documentToken || (subDocResult.url ? this.extractDocumentIdFromUrl(subDocResult.url) || undefined : undefined);
 					if (targetDocToken && processResult.calloutBlocks && processResult.calloutBlocks.length > 0) {
 						Debug.log(`🎨 Processing ${processResult.calloutBlocks.length} callouts in sub-document: ${subDoc.fileName}`);
 						await this.processAllPlaceholders(
@@ -5696,6 +5752,15 @@ export class FeishuApiService {
 					}
 				} catch (calloutError) {
 					Debug.warn(`⚠️ Failed to process callouts in sub-document ${subDoc.fileName}:`, calloutError);
+				}
+
+				// 新建/改写子文档时同步高亮占位符
+				try {
+					if (targetDocToken && shouldProcessContent && this.containsHighlightPlaceholders(processResult)) {
+						await this.processHighlightPlaceholders(targetDocToken, statusNotice);
+					}
+				} catch (highlightError) {
+					Debug.warn(`⚠️ Failed to apply highlights in sub-document ${subDoc.fileName}:`, highlightError);
 				}
 
 				// 在父文档中插入子文档链接
@@ -6304,6 +6369,215 @@ export class FeishuApiService {
 		} catch (error) {
 			Debug.error(`❌ Error replacing placeholder with link in block ${blockId}:`, error);
 			throw error;
+		}
+	}
+
+	/**
+	 * 扫描文档并将高亮占位符转换为飞书原生高亮样式
+	 */
+	private async processHighlightPlaceholders(documentId: string, statusNotice?: Notice): Promise<void> {
+		try {
+			Debug.log(`🎨 Start highlight post-processing for document: ${documentId}`);
+			const allBlocks = await this.getAllDocumentBlocks(documentId);
+			if (!allBlocks || allBlocks.length === 0) {
+				Debug.log('📝 No blocks found when applying highlights');
+				return;
+			}
+
+			if (statusNotice) {
+				statusNotice.setMessage('🎨 正在同步颜色高亮...');
+			}
+
+			let updatedBlocks = 0;
+
+			for (const block of allBlocks) {
+				const textContainer = this.getTextContainerFromBlock(block);
+				if (!textContainer) continue;
+
+				const blockText = this.extractBlockTextContentFromData(textContainer);
+				if (!blockText.includes(this.HIGHLIGHT_START_FLAG)) {
+					continue;
+				}
+
+				const { elements: newElements, hasChanges } = this.buildHighlightElementsForBlock(textContainer.elements);
+				if (!hasChanges) {
+					continue;
+				}
+
+				await this.updateBlockTextElements(documentId, block.block_id, newElements);
+				updatedBlocks++;
+			}
+
+			Debug.log(`🎨 Highlight placeholders applied on ${updatedBlocks} blocks`);
+		} catch (error) {
+			Debug.error('Process highlight placeholders error:', error);
+		}
+	}
+
+	/**
+	 * 提取块内文本容器，统一支持段落/标题/列表等类型
+	 */
+	private getTextContainerFromBlock(block: any): { elements: any[] } | null {
+		if (block.text?.elements) return block.text;
+		for (let level = 1; level <= 9; level++) {
+			const headingKey = `heading${level}`;
+			if (block[headingKey]?.elements) {
+				return block[headingKey];
+			}
+		}
+		if (block.bullet?.elements) return block.bullet;
+		if (block.ordered?.elements) return block.ordered;
+		if (block.quote?.elements) return block.quote;
+		if (block.todo?.elements) return block.todo;
+		return null;
+	}
+
+	/**
+	 * 构建移除占位符后的文本元素，并加上飞书高亮属性
+	 */
+	private buildHighlightElementsForBlock(elements: any[]): { elements: any[]; hasChanges: boolean } {
+		const newElements: any[] = [];
+		let hasChanges = false;
+		let activeHighlight: { color: number; id: string } | null = null;
+
+		for (const element of elements) {
+			if (!element.text_run || typeof element.text_run.content !== 'string') {
+				newElements.push(element);
+				continue;
+			}
+
+			let remaining = element.text_run.content;
+			const baseStyle = element.text_run.text_element_style;
+
+			if (!remaining.includes(this.HIGHLIGHT_START_FLAG) && !remaining.includes(this.HIGHLIGHT_END_FLAG) && !activeHighlight) {
+				newElements.push(element);
+				continue;
+			}
+
+			hasChanges = true;
+
+			while (remaining.length > 0) {
+				if (activeHighlight) {
+					const endToken = `${this.HIGHLIGHT_END_FLAG}${activeHighlight.id}!!`;
+					const endIdx = remaining.indexOf(endToken);
+					if (endIdx === -1) {
+						if (remaining) {
+							newElements.push(this.createTextElement(remaining, baseStyle, activeHighlight.color));
+						}
+						remaining = '';
+					} else {
+						const highlightedText = remaining.substring(0, endIdx);
+						if (highlightedText) {
+							newElements.push(this.createTextElement(highlightedText, baseStyle, activeHighlight.color));
+						}
+						remaining = remaining.substring(endIdx + endToken.length);
+						activeHighlight = null;
+					}
+				} else {
+					const startIdx = remaining.indexOf(this.HIGHLIGHT_START_FLAG);
+					const endIdx = remaining.indexOf(this.HIGHLIGHT_END_FLAG);
+
+					if (startIdx === -1 && endIdx === -1) {
+						if (remaining) {
+							newElements.push(this.createTextElement(remaining, baseStyle));
+						}
+						remaining = '';
+					} else if (startIdx !== -1 && (startIdx < endIdx || endIdx === -1)) {
+						const before = remaining.substring(0, startIdx);
+						if (before) {
+							newElements.push(this.createTextElement(before, baseStyle));
+						}
+						const startMatch = remaining.substring(startIdx).match(/^!!OB_HL_START_(\d+)_([A-Za-z0-9_]+)!!/);
+						if (startMatch) {
+							const colorValue = parseInt(startMatch[1], 10);
+							const highlightId = startMatch[2];
+							activeHighlight = {
+								color: Number.isFinite(colorValue) ? colorValue : this.DEFAULT_HIGHLIGHT_COLOR,
+								id: highlightId
+							};
+							remaining = remaining.substring(startIdx + startMatch[0].length);
+						} else {
+							remaining = remaining.substring(startIdx + this.HIGHLIGHT_START_FLAG.length);
+						}
+					} else {
+						const beforeEnd = remaining.substring(0, endIdx);
+						if (beforeEnd) {
+							newElements.push(this.createTextElement(beforeEnd, baseStyle));
+						}
+						const endMatch = remaining.substring(endIdx).match(/^!!OB_HL_END_([A-Za-z0-9_]+)!!/);
+						if (endMatch) {
+							remaining = remaining.substring(endIdx + endMatch[0].length);
+						} else {
+							remaining = remaining.substring(endIdx + this.HIGHLIGHT_END_FLAG.length);
+						}
+					}
+				}
+			}
+		}
+
+		if (activeHighlight) {
+			Debug.warn(`⚠️ Highlight placeholder ${activeHighlight.id} 未找到结尾标记，已自动忽略残余标记`);
+		}
+
+		if (!hasChanges) {
+			return { elements, hasChanges: false };
+		}
+
+		if (newElements.length === 0) {
+			newElements.push(this.createTextElement('', {}));
+		}
+
+		return { elements: newElements, hasChanges: true };
+	}
+
+	/**
+	 * 构建文本元素，自动复制原始样式并叠加高亮颜色
+	 */
+	private createTextElement(content: string, baseStyle?: any, highlightColor?: number): any {
+		const style = baseStyle ? { ...baseStyle } : {};
+		if (highlightColor !== undefined) {
+			// 使用飞书正确的 text_highlight_color_class 属性
+			style.text_highlight_color_class = this.HIGHLIGHT_COLOR_CLASSES[highlightColor] || this.HIGHLIGHT_COLOR_CLASSES[this.DEFAULT_HIGHLIGHT_COLOR];
+		}
+		if (Object.keys(style).length === 0) {
+			return {
+				text_run: {
+					content: content
+				}
+			};
+		}
+		return {
+			text_run: {
+				content: content,
+				text_element_style: style
+			}
+		};
+	}
+
+	/**
+	 * 调用飞书 API 更新块的文本元素
+	 */
+	private async updateBlockTextElements(documentId: string, blockId: string, elements: any[]): Promise<void> {
+		const safeElements = elements.length > 0 ? elements : [{ text_run: { content: '', text_element_style: {} } }];
+		const requestData = {
+			update_text_elements: {
+				elements: safeElements
+			}
+		};
+
+		const response = await requestUrl({
+			url: `${FEISHU_CONFIG.BASE_URL}/docx/v1/documents/${documentId}/blocks/${blockId}`,
+			method: 'PATCH',
+			headers: {
+				'Authorization': `Bearer ${this.settings.accessToken}`,
+				'Content-Type': 'application/json'
+			},
+			body: JSON.stringify(requestData)
+		});
+
+		const data = response.json || JSON.parse(response.text);
+		if (data.code !== 0) {
+			throw new Error(data.msg || '更新文本块失败');
 		}
 	}
 
@@ -7735,6 +8009,15 @@ export class FeishuApiService {
 				} catch (fileError) {
 					Debug.warn('⚠️ File upload failed, but document content was updated:', fileError);
 					// 文件上传失败不影响主要内容更新
+				}
+			}
+
+			// 8.1 高亮占位符转换
+			if (this.containsHighlightPlaceholders(processResult)) {
+				try {
+					await this.processHighlightPlaceholders(documentId, statusNotice);
+				} catch (highlightError) {
+					Debug.warn('⚠️ Highlight post-processing failed during update:', highlightError);
 				}
 			}
 

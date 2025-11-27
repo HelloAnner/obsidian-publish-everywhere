@@ -7,6 +7,7 @@ import { FeishuApiService } from './src/feishu-api';
 import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
 import { Debug } from './src/debug';
+import { CallbackPublishQueue, PublishTask } from './src/publish-queue';
 
 interface ConfluencePublisherSettings {
 	confluenceUrl: string;
@@ -40,6 +41,7 @@ export default class PublishEverywherePlugin extends Plugin {
 	settings: PublishEverywhereSettings;
 	feishuApi: FeishuApiService;
 	markdownProcessor: MarkdownProcessor;
+	publishQueue: CallbackPublishQueue;
 
 	async onload(): Promise<void> {
 		// 加载设置
@@ -48,6 +50,11 @@ export default class PublishEverywherePlugin extends Plugin {
 		// 初始化服务
 		this.feishuApi = new FeishuApiService(this.settings, this.app);
 		this.markdownProcessor = new MarkdownProcessor(this.app);
+
+		// 初始化发布队列
+		this.publishQueue = new CallbackPublishQueue(async (task: PublishTask) => {
+			await this.executePublishTask(task);
+		});
 
 		// 注册自定义协议处理器，实现自动授权回调
 		this.registerObsidianProtocolHandler('feishu-auth', (params) => {
@@ -287,7 +294,9 @@ export default class PublishEverywherePlugin extends Plugin {
 				{
 					type: parsedParent.type,
 					nodeToken: parsedParent.nodeToken,
-					folderId: parsedParent.folderId
+					folderId: parsedParent.folderId,
+					spaceId: parsedParent.spaceId,
+					host: parsedParent.host
 				}
 			);
 
@@ -503,9 +512,32 @@ export default class PublishEverywherePlugin extends Plugin {
 	}
 
 	/**
-	 * 分享指定文件
+	 * 分享指定文件（添加到队列）
 	 */
 	async shareFile(file: TFile): Promise<void> {
+		this.log(`Adding file share to queue: ${file.path}`);
+
+		// 添加到队列
+		this.publishQueue.add({
+			type: 'feishu',
+			file: file
+		});
+
+		// 显示排队状态
+		if (!this.settings.suppressShareNotices) {
+			const queueStatus = this.publishQueue.getStatus();
+			if (this.publishQueue.processing) {
+				new Notice(queueStatus, 3000);
+			} else {
+				new Notice('⏳ 已加入发布队列...', 2000);
+			}
+		}
+	}
+
+	/**
+	 * 内部方法：实际执行文件分享（由队列调用）
+	 */
+	private async shareFileInternal(file: TFile): Promise<void> {
 		this.log(`Starting file share process for: ${file.path}`);
 
 		// 创建持续状态提示（可抑制）
@@ -830,21 +862,41 @@ export default class PublishEverywherePlugin extends Plugin {
 	}
 
 	/**
-	 * 一键发布到所有平台（根据frontmatter中的属性）
+	 * 一键发布到所有平台（添加到队列）
 	 */
 	async publishToAllPlatforms(): Promise<void> {
-		this.log('Starting publish to all platforms');
-
-		const activeFile = this.app.workspace.getActiveFile();
-		if (!activeFile) {
-			this.log('No active file found', 'warn');
+		const activeView = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!activeView) {
 			new Notice('❌ 没有打开的笔记');
 			return;
 		}
 
-		if (activeFile.extension !== 'md') {
-			this.log(`Unsupported file type: ${activeFile.extension}`, 'warn');
-			new Notice('❌ 只支持发布 Markdown 文件');
+		this.log('Adding publish to all platforms to queue');
+
+		// 添加到队列
+		this.publishQueue.add({
+			type: 'all',
+			view: activeView
+		});
+
+		// 显示排队状态
+		const queueStatus = this.publishQueue.getStatus();
+		if (this.publishQueue.processing) {
+			new Notice(`⏳ ${queueStatus}`, 3000);
+		} else {
+			new Notice('⏳ 已加入发布队列...', 2000);
+		}
+	}
+
+	/**
+	 * 内部方法：实际执行一键发布所有平台（串行执行）
+	 */
+	private async publishToAllPlatformsInternal(view: MarkdownView): Promise<void> {
+		this.log('Starting publish to all platforms');
+
+		const activeFile = view.file;
+		if (!activeFile) {
+			this.log('No active file found', 'warn');
 			return;
 		}
 
@@ -865,57 +917,52 @@ export default class PublishEverywherePlugin extends Plugin {
 			return;
 		}
 
-		// 开始发布
-		new Notice(`⏳ 开始发布到 ${platforms.join(' 和 ')}...`);
+		// 开始发布（串行执行，避免并发问题）
+		new Notice(`⏳ 开始发布到 ${platforms.join(' 和 ')}...`, 0);
 		this.log(`Publishing to platforms: ${platforms.join(', ')}`);
 
-		const promises: Promise<void>[] = [];
 		const results: { platform: string; success: boolean; error?: string }[] = [];
 
-		// 发布到KMS
+		// 发布到KMS（如果配置了）
 		if (frontmatter.kms) {
-			promises.push(
-				(async () => {
-					try {
-						this.log('Publishing to KMS...');
-						await this.publishCurrentNoteToConfluence(
-							this.app.workspace.getActiveViewOfType(MarkdownView)!
-						);
-						results.push({ platform: 'KMS', success: true });
-					} catch (error) {
-						results.push({
-							platform: 'KMS',
-							success: false,
-							error: error.message
-						});
-					}
-				})()
-			);
+			try {
+				this.log('Publishing to KMS...');
+				await this.publishCurrentNoteToConfluenceInternal(view);
+				results.push({ platform: 'KMS', success: true });
+				new Notice('✅ KMS 发布成功', 2000);
+			} catch (error) {
+				results.push({
+					platform: 'KMS',
+					success: false,
+					error: error.message
+				});
+				this.log(`KMS 发布失败: ${error.message}`, 'error');
+				new Notice(`❌ KMS 发布失败: ${error.message}`, 4000);
+			}
+
+			// 平台间延迟，避免触发频率限制
+			if (platforms.length > 1) {
+				await new Promise(resolve => setTimeout(resolve, 1000));
+			}
 		}
 
-		// 发布到飞书
+		// 发布到飞书（如果配置了）
 		if (frontmatter.feishu) {
-			promises.push(
-				(async () => {
-					try {
-						this.log('Publishing to Feishu...');
-						await this.publishCurrentNoteToFeishu(
-							this.app.workspace.getActiveViewOfType(MarkdownView)!
-						);
-						results.push({ platform: '飞书', success: true });
-					} catch (error) {
-						results.push({
-							platform: '飞书',
-							success: false,
-							error: error.message
-						});
-					}
-				})()
-			);
+			try {
+				this.log('Publishing to Feishu...');
+				await this.publishCurrentNoteToFeishuInternal(view);
+				results.push({ platform: '飞书', success: true });
+				new Notice('✅ 飞书发布成功', 2000);
+			} catch (error) {
+				results.push({
+					platform: '飞书',
+					success: false,
+					error: error.message
+				});
+				this.log(`飞书 发布失败: ${error.message}`, 'error');
+				new Notice(`❌ 飞书 发布失败: ${error.message}`, 4000);
+			}
 		}
-
-		// 等待所有发布完成
-		await Promise.allSettled(promises);
 
 		// 显示结果总结
 		const successCount = results.filter(r => r.success).length;
@@ -925,9 +972,8 @@ export default class PublishEverywherePlugin extends Plugin {
 			new Notice(`✅ 成功发布到 ${successCount} 个平台`, 5000);
 		} else {
 			const failedPlatforms = results.filter(r => !r.success).map(r => r.platform).join(', ');
-			const errors = results.filter(r => !r.success).map(r => r.error).join('\n');
-			new Notice(`⚠️ 发布完成：${successCount} 个成功，${failCount} 个失败\n失败平台：${failedPlatforms}`, 8000);
 			this.log(`Publish results - Success: ${successCount}, Failed: ${failCount}`, failCount > 0 ? 'warn' : 'info');
+			new Notice(`⚠️ 发布完成：${successCount} 个成功，${failCount} 个失败\n失败平台：${failedPlatforms}`, 8000);
 		}
 	}
 
@@ -1005,6 +1051,35 @@ export default class PublishEverywherePlugin extends Plugin {
 				break;
 			default:
 				Debug.log(message);
+		}
+	}
+
+	/**
+	 * 执行发布任务（由队列调用）
+	 */
+	private async executePublishTask(task: PublishTask): Promise<void> {
+		try {
+			switch (task.type) {
+				case 'feishu':
+					if (task.view) {
+						await this.publishCurrentNoteToFeishuInternal(task.view);
+					} else if (task.file) {
+						await this.shareFileInternal(task.file);
+					}
+					break;
+				case 'confluence':
+					if (task.view) {
+						await this.publishCurrentNoteToConfluenceInternal(task.view);
+					}
+					break;
+				case 'all':
+					if (task.view) {
+						await this.publishToAllPlatformsInternal(task.view);
+					}
+					break;
+			}
+		} catch (error) {
+			this.log(`发布任务执行失败: ${error.message}`, 'error');
 		}
 	}
 }
