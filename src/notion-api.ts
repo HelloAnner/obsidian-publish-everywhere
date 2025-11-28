@@ -21,6 +21,16 @@ import * as path from 'path';
 import * as mime from 'mime-types';
 import { Debug } from './debug';
 
+// Notion API 约束与重试策略（遵循 AGENTS.md 中的网络退避规定）
+const MAX_CHILDREN_PER_REQ = 100;           // Notion 每次追加 children 的上限
+const INTER_REQUEST_DELAY_MS = 350;         // 为降低 429 概率，批次之间加入轻微间隔
+const RETRY_429_DELAY_MS = 20_000;          // 429 固定退避 20 秒
+const RETRY_5XX_DELAY_MS = 2_000;           // 5xx 退避 2 秒
+const MAX_429_RETRIES = 3;                  // 429 最多重试 3 次
+const MAX_5XX_RETRIES = 1;                  // 5xx/网络超时最多重试 1 次
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export class NotionApiService {
     private apiToken: string;
     private baseUrl: string = 'https://api.notion.com/v1';
@@ -285,25 +295,51 @@ export class NotionApiService {
     }
 
     /**
-     * 追加子块到页面底部（每次最多100个）
+     * 追加子块到页面/块底部，带自适应批次与重试：
+     * - 默认每批 ≤100；若触发 413（Payload Too Large）则对半降批次重试
+     * - 批次之间延时以降低 429 概率
      */
     private async appendBlockChildren(pageId: string, children: NotionBlock[]): Promise<void> {
         Debug.log(`[Notion] appendBlockChildren: adding ${children.length} children to block ${pageId}`);
-        for (let i = 0; i < children.length; i += 100) {
-            const batch = children.slice(i, i + 100);
-            Debug.log(`[Notion] Processing batch ${i/100 + 1}/${Math.ceil(children.length/100)} with ${batch.length} items`);
+        const allTableRows = children.length > 0 && children.every((c: any) => c?.type === 'table_row');
+        // 对表格行默认更小的初始批次，避免大表触发 413/429
+        let batchSize = allTableRows ? Math.min(20, MAX_CHILDREN_PER_REQ) : Math.min(MAX_CHILDREN_PER_REQ, Math.max(1, Math.ceil(children.length / Math.ceil(children.length / MAX_CHILDREN_PER_REQ))));
+        const totalBatches = Math.ceil(children.length / batchSize);
+
+        for (let start = 0, batchIndex = 0; start < children.length; start += batchSize, batchIndex++) {
+            const batch = children.slice(start, start + batchSize);
+            Debug.log(`[Notion] Processing children batch ${batchIndex + 1}/${totalBatches} with ${batch.length} items`);
+
             try {
                 await this.makeRequest(`/blocks/${pageId}/children`, 'PATCH', { children: batch });
             } catch (err) {
-                const msg = (err as Error).message || '';
-                Debug.error(`[Notion] Error in appendBlockChildren batch ${i/100 + 1}:`, err);
-                if (/invalid_request_url|405|method/i.test(msg) || /400/.test(msg)) {
-                    Debug.log(`[Notion] Retrying with POST method for batch ${i/100 + 1}`);
+                const msg = (err as Error)?.message || '';
+                Debug.error(`[Notion] appendBlockChildren error on batch ${batchIndex + 1}: ${msg}`);
+
+                // 兼容部分工作区 PATCH 不可用的情况，切换为 POST
+                if (/invalid_request_url|405|method/i.test(msg) || /\b400\b/.test(msg)) {
+                    Debug.log(`[Notion] Retrying with POST method for batch ${batchIndex + 1}`);
                     await this.makeRequest(`/blocks/${pageId}/children`, 'POST', { children: batch });
-                } else {
+                }
+                // 请求体过大，降低批次大小重试一次
+                else if (/\b413\b|payload\s*too\s*large/i.test(msg)) {
+                    const newSize = Math.max(1, Math.floor(batchSize / 2));
+                    if (newSize === batchSize) throw err; // 已无法再降
+                    Debug.log(`[Notion] Payload too large. Shrinking batch size ${batchSize} -> ${newSize} and retrying batch ${batchIndex + 1}`);
+                    batchSize = newSize;
+                    // 回退 start 到该批次开头以便重试
+                    start -= batch.length;
+                    batchIndex--;
+                    await sleep(INTER_REQUEST_DELAY_MS);
+                    continue;
+                }
+                else {
                     throw err;
                 }
             }
+
+            // 降低触发 429 的概率
+            await sleep(INTER_REQUEST_DELAY_MS);
         }
         Debug.log(`[Notion] Successfully added all ${children.length} children to block ${pageId}`);
     }
@@ -312,45 +348,96 @@ export class NotionApiService {
      * 追加块并为 table 追加行（分批 ≤100），避免单请求超限。
      */
     private async appendBlocksWithTables(pageId: string, prepared: any[], tablePlans: Map<number, any[]>): Promise<void> {
-        for (let offset = 0; offset < prepared.length; offset += 100) {
-            const batch = prepared.slice(offset, offset + 100);
+        // 策略：
+        // - 非表格块使用批量（≤100）提交；
+        // - 表格块单独提交，拿到 table id 后再分批写入行，避免依赖返回顺序映射导致错配。
+
+        let batch: any[] = [];
+        const flushBatch = async () => {
+            if (batch.length === 0) return;
             let resp: any = null;
             try {
                 resp = await this.makeRequest(`/blocks/${pageId}/children`, 'PATCH', { children: batch });
             } catch (err) {
-                const msg = (err as Error).message || '';
-                if (/invalid_request_url|405|method/i.test(msg) || /400/.test(msg)) {
+                const msg = (err as Error)?.message || '';
+                if (/invalid_request_url|405|method/i.test(msg) || /\b400\b/.test(msg)) {
                     resp = await this.makeRequest(`/blocks/${pageId}/children`, 'POST', { children: batch });
+                } else if (/\b413\b|payload\s*too\s*large/i.test(msg)) {
+                    // 若批次仍过大，改为逐个发送
+                    const items = batch;
+                    batch = [];
+                    for (const item of items) {
+                        await this.appendBlocksWithTables(pageId, [item], tablePlans);
+                    }
+                    await sleep(INTER_REQUEST_DELAY_MS);
+                    return;
                 } else {
                     throw err;
                 }
             }
-            const results: any[] = (resp && (resp as any).results) ? (resp as any).results : [];
-            for (let k = 0; k < batch.length; k++) {
-                const originalIndex = offset + k;
-                const sent = batch[k];
-                const created = results[k];
-                if (!created) continue;
-                if (sent && sent.type === 'table') {
-                    const rows = tablePlans.get(originalIndex) || [];
-                    if (rows.length > 0) {
-                        Debug.log(`[Notion] Processing table with ${rows.length} rows`);
-                        // 首先删除占位符行
-                        const tableBlocks = await this.getPageBlocks(created.id);
-                        Debug.log(`[Notion] Found ${tableBlocks.length} blocks in table, deleting placeholder rows`);
-                        for (const block of tableBlocks) {
-                            if (block.type === 'table_row') {
-                                await this.deleteBlock(block.id);
-                            }
-                        }
-                        // 然后添加实际的行
-                        Debug.log(`[Notion] Adding ${rows.length} actual rows to table`);
-                        await this.appendBlockChildren(created.id, rows as any);
-                        Debug.log(`[Notion] Successfully added ${rows.length} rows to table`);
-                    }
+            Debug.log(`[Notion] Flushed non-table batch with ${batch.length} items`);
+            batch = [];
+            await sleep(INTER_REQUEST_DELAY_MS);
+            return resp;
+        };
+
+        for (let i = 0; i < prepared.length; i++) {
+            const b = prepared[i];
+            const isTable = b && b.type === 'table';
+
+            if (!isTable) {
+                batch.push(b);
+                if (batch.length >= MAX_CHILDREN_PER_REQ) await flushBatch();
+                continue;
+            }
+
+            // 先把之前累积的非表格块刷出去
+            await flushBatch();
+
+            // 单独提交表格块
+            let resp: any = null;
+            try {
+                resp = await this.makeRequest(`/blocks/${pageId}/children`, 'PATCH', { children: [b] });
+            } catch (err) {
+                const msg = (err as Error)?.message || '';
+                if (/invalid_request_url|405|method/i.test(msg) || /\b400\b/.test(msg)) {
+                    resp = await this.makeRequest(`/blocks/${pageId}/children`, 'POST', { children: [b] });
+                } else {
+                    throw err;
                 }
             }
+
+            const created = (resp && resp.results && resp.results[0]) ? resp.results[0] : null;
+            if (!created) {
+                Debug.warn('[Notion] No table block returned after append; fetching page children to locate it.');
+                // 兜底：获取最后一个子块作为新建的表格（代价较高，仅在异常情况触发）
+                const pageChildren = await this.getPageBlocks(pageId);
+                const last = pageChildren[pageChildren.length - 1] as any;
+                if (last?.type === 'table') {
+                    (resp as any) = { results: [last] };
+                }
+            }
+
+            const tbl = (resp && resp.results && resp.results[0]) ? resp.results[0] : null;
+            if (tbl?.id) {
+                const planRows = tablePlans.get(i) || [];
+                Debug.log(`[Notion] Table#${i} created: ${tbl.id}. Planned rows: ${planRows.length}`);
+                // 删除占位行
+                const existing = await this.getPageBlocks(tbl.id);
+                for (const block of existing) {
+                    if (block.type === 'table_row') await this.deleteBlock(block.id);
+                }
+                // 追加实际行
+                await this.appendBlockChildren(tbl.id, planRows as any);
+                Debug.log(`[Notion] Table rows appended: ${planRows.length}`);
+                await sleep(INTER_REQUEST_DELAY_MS);
+            } else {
+                Debug.warn('[Notion] Unable to obtain created table id; rows will be skipped for this table.');
+            }
         }
+
+        // 刷掉尾批非表格块
+        await flushBatch();
     }
 
     /**
@@ -369,7 +456,7 @@ export class NotionApiService {
                     b.table.children = [];
                 }
 
-                Debug.log(`[Notion] Found table at index ${idx} with ${b.table.children.length} rows`);
+                Debug.log(`[Notion] Found table at index ${idx} with ${b.table.children.length} rows, width=${b.table.table_width}, has_column_header=${b.table.has_column_header}`);
 
                 // 提取表格行到单独的计划中
                 plans.set(idx, b.table.children);
@@ -399,6 +486,10 @@ export class NotionApiService {
         });
 
         Debug.log(`[Notion] prepareBlocksForAppend: prepared ${prepared.length} blocks, ${plans.size} table plans`);
+        // 追加每个表格计划的统计，便于定位行数异常
+        for (const [i, rows] of plans.entries()) {
+            Debug.log(`[Notion] tablePlan[${i}] rows=${rows?.length ?? 0}`);
+        }
         return { prepared, tablePlans: plans };
     }
 
@@ -559,22 +650,54 @@ export class NotionApiService {
             'Content-Type': 'application/json'
         };
 
-        Debug.api(`[Notion] ${method}`, url, body);
+        let attempt429 = 0;
+        let attempt5xx = 0;
 
-        const resp = await requestUrl({
-            url,
-            method,
-            headers,
-            body: (body && method !== 'GET') ? JSON.stringify(body) : undefined,
-            throw: false
-        });
+        while (true) {
+            Debug.api(`[Notion] ${method}`, url, body);
+            let resp: any;
 
-        Debug.log(`[Notion] API Response Status: ${resp.status}`);
-        Debug.log(`[Notion] API Response Headers:`, resp.headers);
+            try {
+                resp = await requestUrl({
+                    url,
+                    method,
+                    headers,
+                    body: (body && method !== 'GET') ? JSON.stringify(body) : undefined,
+                    throw: false
+                });
+            } catch (networkErr) {
+                // 认为是网络故障或超时 → 2s 后最多重试一次
+                if (attempt5xx < MAX_5XX_RETRIES) {
+                    attempt5xx++;
+                    Debug.error(`[Notion] Network error, retrying in ${RETRY_5XX_DELAY_MS}ms (attempt ${attempt5xx}/${MAX_5XX_RETRIES})`, networkErr);
+                    await sleep(RETRY_5XX_DELAY_MS);
+                    continue;
+                }
+                throw networkErr;
+            }
 
-        if (resp.status < 200 || resp.status >= 300) {
-            let errorMessage = `[${method} ${path}] Notion API Error: ${resp.status}`;
+            Debug.log(`[Notion] API Response Status: ${resp.status}`);
+            Debug.log(`[Notion] API Response Headers:`, resp.headers);
 
+            // 成功
+            if (resp.status >= 200 && resp.status < 300) {
+                if (resp.json) {
+                    Debug.log(`[Notion] API Response JSON:`, resp.json);
+                    return resp.json as T;
+                }
+                try {
+                    const parsed = JSON.parse(resp.text || '{}') as T;
+                    Debug.log(`[Notion] API Response Text (parsed):`, parsed);
+                    return parsed;
+                } catch {
+                    Debug.log(`[Notion] API Response Text (raw): ${resp.text}`);
+                    return {} as T;
+                }
+            }
+
+            // 非 2xx：判断重试策略
+            const status = resp.status as number;
+            let errorMessage = `[${method} ${path}] Notion API Error: ${status}`;
             try {
                 const errorData = resp.json || JSON.parse(resp.text || '{}');
                 Debug.error(`[Notion] API Error Data:`, errorData);
@@ -587,33 +710,34 @@ export class NotionApiService {
                 errorMessage += ` - ${resp.text}`;
             }
 
-            // 提供用户友好的错误信息
-            if (resp.status === 401) {
-                errorMessage = 'API Token无效或已过期，请检查Notion集成设置';
-            } else if (resp.status === 403) {
-                errorMessage = '权限不足，请确保集成有足够的权限访问目标页面';
-            } else if (resp.status === 404) {
-                errorMessage = '资源未找到，请检查页面ID或数据库ID是否正确';
-            } else if (resp.status === 429) {
-                errorMessage = 'API调用频率限制，请稍后重试';
-            } else if (resp.status === 500) {
-                errorMessage = 'Notion服务器内部错误，请稍后重试';
+            if (status === 429) {
+                if (attempt429 < MAX_429_RETRIES) {
+                    attempt429++;
+                    const retryAfter = Number(resp.headers?.['retry-after']) || (RETRY_429_DELAY_MS / 1000);
+                    const wait = Math.max(RETRY_429_DELAY_MS, retryAfter * 1000);
+                    Debug.log(`[Notion] 429 rate limited. Backing off for ${wait}ms (attempt ${attempt429}/${MAX_429_RETRIES}).`);
+                    await sleep(wait);
+                    continue;
+                }
+                throw new Error(`[HTTP 429] API调用频率限制，请稍后重试。${errorMessage}`);
             }
 
-            throw new Error(errorMessage);
-        }
+            if (status >= 500 && status < 600) {
+                if (attempt5xx < MAX_5XX_RETRIES) {
+                    attempt5xx++;
+                    Debug.log(`[Notion] ${status} server error. Retrying in ${RETRY_5XX_DELAY_MS}ms (attempt ${attempt5xx}/${MAX_5XX_RETRIES}).`);
+                    await sleep(RETRY_5XX_DELAY_MS);
+                    continue;
+                }
+                throw new Error(`[HTTP ${status}] Notion服务器内部错误，请稍后重试。${errorMessage}`);
+            }
 
-        if (resp.json) {
-            Debug.log(`[Notion] API Response JSON:`, resp.json);
-            return resp.json as T;
-        }
-        try {
-            const parsed = JSON.parse(resp.text || '{}') as T;
-            Debug.log(`[Notion] API Response Text (parsed):`, parsed);
-            return parsed;
-        } catch {
-            Debug.log(`[Notion] API Response Text (raw): ${resp.text}`);
-            return {} as T;
+            // 其他错误 → 直接抛出，保留状态码便于上层判定
+            if (status === 401) errorMessage = 'API Token无效或已过期，请检查Notion集成设置';
+            else if (status === 403) errorMessage = '权限不足，请确保集成有足够的权限访问目标页面';
+            else if (status === 404) errorMessage = '资源未找到，请检查页面ID或数据库ID是否正确';
+
+            throw new Error(`[HTTP ${status}] ${errorMessage}`);
         }
     }
 

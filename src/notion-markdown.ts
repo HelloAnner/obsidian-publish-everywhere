@@ -5,6 +5,7 @@
  */
 
 import { NotionBlock, NotionRichText } from './types';
+import { Debug } from './debug';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -215,6 +216,16 @@ export async function convertMarkdownToBlocks(markdown: string, options: Convert
                 row.table_row = { cells };
                 tableBlock.table.children.push(row);
             }
+
+            // Fallback：当 remark 仅解析出表头（children <= 1）但源码疑似为大表格时，基于源码片段恢复行
+            try {
+                const pos = (node as any)?.position;
+                if ((tableBlock.table.children?.length || 0) <= 1 && pos && typeof pos.start?.offset === 'number' && typeof pos.end?.offset === 'number') {
+                    const recovered = recoverPipeTableRowsAroundPosition(markdown, pos, width);
+                    Debug.log(`[MD->Notion] table fallback: astRows=${rows?.length ?? 0}, recoveredRows=${recovered.length}, width=${width}`);
+                    if (recovered.length > 1) tableBlock.table.children = recovered;
+                }
+            } catch { /* 忽略兜底恢复出错，不影响主流程 */ }
             blocks.push(tableBlock);
         },
         image: async (node) => {
@@ -334,4 +345,143 @@ export async function convertMarkdownToBlocks(markdown: string, options: Convert
     }
 
     return norm(blocks) as NotionBlock[];
+}
+
+// 基于 Markdown 源码片段恢复 pipe 表格的行（用于 remark 在极端场景下仅解析出表头的兜底）
+function recoverPipeTableRowsFromMarkdown(segment: string, expectedWidth: number): any[] {
+    // 简单、稳健的 pipe 表格解析：
+    // - 允许前后有空白；
+    // - 第2行作为分隔行（---/:-: 等）；
+    // - 之后连续以 '|' 开头或包含多 '|' 的行视为数据行；
+    // - 单元格使用未转义的竖线分割，去除首尾 '|' 与空白；
+    const lines = segment.split(/\r?\n/);
+    if (lines.length < 2) return [];
+
+    // 找到分隔行位置（容错：可能有空白行）
+    let headerIndex = 0;
+    let sepIndex = -1;
+    for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 5); i++) {
+        const ln = lines[i].trim();
+        if (!ln) continue;
+        // 标准对齐行匹配
+        if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln)) { sepIndex = i; break; }
+        // 容错：至少包含3个 '-' 且含有 '|'
+        if (ln.includes('|') && /-{3,}/.test(ln)) { sepIndex = i; break; }
+    }
+    if (sepIndex === -1) return [];
+
+    const result: any[] = [];
+    for (let i = headerIndex; i < lines.length; i++) {
+        if (i === sepIndex) continue; // 跳过分隔行
+        const raw = lines[i];
+        if (!raw || !/[|]/.test(raw)) {
+            // 遇到明显不是表格行的行，认为表格结束
+            if (i > sepIndex) break;
+            continue;
+        }
+
+        // 按未转义的 | 分割（支持首尾 |）
+        const cells = splitByUnescapedPipes(raw).map(s => s.trim());
+        if (cells.length === 0) continue;
+        // 去掉首尾空单元格（由首尾 | 产生）
+        if (cells[0] === '') cells.shift();
+        if (cells.length && cells[cells.length - 1] === '') cells.pop();
+
+        // 若列数与预期不一致，进行简单对齐（截断/补空）
+        const width = expectedWidth || cells.length || 1;
+        if (cells.length > width) cells.length = width;
+        while (cells.length < width) cells.push('');
+
+        // 构建 Notion table_row（仅以纯文本兜底；复杂内联语法在此兜底中不做二次解析）
+        const row: any = { object: 'block', type: 'table_row', table_row: { cells: cells.map(txt => [{
+            type: 'text',
+            text: { content: txt },
+            plain_text: txt,
+            annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' }
+        }]) } };
+        result.push(row);
+    }
+
+    // 至少包含表头与一行数据才算恢复有效
+    return result.length >= 2 ? result : result;
+}
+
+// 从整篇 markdown 的位置附近恢复 pipe 表格，避免 AST position 只覆盖表头时抓不到数据行
+function recoverPipeTableRowsAroundPosition(markdown: string, pos: any, expectedWidth: number): any[] {
+    const lines = markdown.split(/\r?\n/);
+    const start = Math.max(0, (pos?.start?.line ?? 1) - 1);
+    // 向下扫描，抓取 header 行、分隔行、以及后续连续的表格行
+    let headerIndex = start;
+    // 跳过起始处的非表格行（极端情况下 position 指到表头前一行）
+    while (headerIndex < lines.length && !/[|]/.test(lines[headerIndex])) headerIndex++;
+    if (headerIndex >= lines.length) return [];
+
+    let sepIndex = -1;
+    for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 10); i++) {
+        const ln = lines[i]?.trim();
+        if (!ln) continue;
+        if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln) || (ln.includes('|') && /-{3,}/.test(ln))) { sepIndex = i; break; }
+        // 若很快遇到非表格样式，则失败
+        if (!ln.includes('|')) break;
+    }
+    if (sepIndex === -1) return [];
+
+    const collected: string[] = [];
+    // 包含表头行
+    collected.push(lines[headerIndex] ?? '');
+    // 向下收集数据行，直到遇到空行或明显非表格行
+    for (let i = sepIndex + 1; i < lines.length; i++) {
+        const ln = lines[i];
+        if (!ln) break;
+        // 非表格行结束
+        if (!ln.includes('|')) break;
+        collected.push(ln);
+    }
+    return buildRowsFromRawLines(collected, expectedWidth);
+}
+
+function splitByUnescapedPipes(line: string): string[] {
+    const parts: string[] = [];
+    let cur = '';
+    let escaped = false;
+    let inCode = false; // 简易处理反引号内的管道
+    let wikiDepth = 0;  // 处理 [[...|...]] 中的竖线
+    for (let i = 0; i < line.length; i++) {
+        const ch = line[i];
+        const next = line[i+1];
+        if (escaped) { cur += ch; escaped = false; continue; }
+        if (ch === '\\') { escaped = true; continue; }
+        if (ch === '`') { inCode = !inCode; cur += ch; continue; }
+        // 处理 Obsidian/Wiki 链接 [[...|...]]
+        if (ch === '[' && next === '[') { wikiDepth++; cur += ch; continue; }
+        if (ch === ']' && next === ']') { wikiDepth = Math.max(0, wikiDepth - 1); cur += ch; continue; }
+        if (ch === '|' && !inCode && wikiDepth === 0) { parts.push(cur); cur = ''; continue; }
+        cur += ch;
+    }
+    parts.push(cur);
+    return parts;
+}
+
+function buildRowsFromRawLines(lines: string[], expectedWidth: number): any[] {
+    const rows: any[] = [];
+    if (!lines.length) return rows;
+    for (const raw of lines) {
+        if (!raw) continue;
+        // 忽略典型的分隔行
+        const isSep = /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(raw.trim());
+        if (isSep) continue;
+        const cells = splitByUnescapedPipes(raw).map(s => s.trim());
+        if (cells.length === 0) continue;
+        if (cells[0] === '') cells.shift();
+        if (cells.length && cells[cells.length - 1] === '') cells.pop();
+        const width = expectedWidth || cells.length || 1;
+        if (cells.length > width) cells.length = width;
+        while (cells.length < width) cells.push('');
+        const row: any = { object: 'block', type: 'table_row', table_row: { cells: cells.map(txt => [{
+            type: 'text', text: { content: txt }, plain_text: txt,
+            annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' }
+        }]) } };
+        rows.push(row);
+    }
+    return rows;
 }
