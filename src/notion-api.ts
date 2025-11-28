@@ -24,6 +24,7 @@ import { Debug } from './debug';
 // Notion API 约束与重试策略（遵循 AGENTS.md 中的网络退避规定）
 const MAX_CHILDREN_PER_REQ = 100;           // Notion 每次追加 children 的上限
 const INTER_REQUEST_DELAY_MS = 350;         // 为降低 429 概率，批次之间加入轻微间隔
+const TABLE_ROW_BATCH_SIZE_DEFAULT = 10;    // 大表使用更小的默认批次，更稳健
 const RETRY_429_DELAY_MS = 20_000;          // 429 固定退避 20 秒
 const RETRY_5XX_DELAY_MS = 2_000;           // 5xx 退避 2 秒
 const MAX_429_RETRIES = 3;                  // 429 最多重试 3 次
@@ -249,9 +250,45 @@ export class NotionApiService {
         return await this.makeRequest<NotionPage>(`/pages/${pageId}`, 'GET');
     }
 
-	/**
-	 * 获取页面块内容
-	 */
+    /**
+     * 直接将 Markdown 发布到已存在的 Notion 页面（按页面ID覆盖内容）
+     * - 不创建/搜索页面；仅对指定 pageId 执行 replaceContent=true 的更新
+     */
+    async publishToExistingPage(
+        pageId: string,
+        markdown: string,
+        context: NotionProcessContext & { sourceDir?: string }
+    ): Promise<NotionPublishResult> {
+        Debug.log(`[Notion] publishToExistingPage: pageId=${pageId}`);
+        try {
+            // Markdown → Blocks（含本地资源上传解析）
+            let blocks = await this.mdToBlocks(markdown, (context as any).sourceDir);
+            Debug.log(`[Notion] Converted ${blocks.length} blocks (existing page)`);
+            // 全局兜底修复只含表头的表格
+            blocks = this.repairTablesFromMarkdown(blocks, markdown);
+            const tblInfoExisting = (blocks as any[]).filter(b => (b as any)?.type === 'table').map((t: any) => t?.table?.children?.length ?? 0).join(',');
+            Debug.log(`[Notion] After repair (existing), table rows per block: [${tblInfoExisting}]`);
+
+            // 预处理并分批追加（表格行分批） - 仅用于日志统计，不把裁剪后的 prepared 当作内容传入
+            const { prepared, tablePlans } = this.prepareBlocksForAppend(blocks as any[]);
+            Debug.log(`[Notion] Prepared ${prepared.length} blocks (existing page), tables=${tablePlans.size}`);
+
+            // 覆盖写入：传入原始 blocks，让 updatePage 自行 prepare，避免只剩表头
+            await this.updatePage(pageId, blocks as any[], { replaceContent: true });
+
+            // 回读页面获取URL
+            const page = await this.makeRequest<NotionPage>(`/pages/${pageId}`, 'GET');
+            Debug.log(`[Notion] Updated existing page ok: ${page?.url}`);
+            return { success: true, pageId, url: (page as any)?.url, title: undefined, updatedExisting: true };
+        } catch (error) {
+            Debug.error('[Notion] publishToExistingPage failed:', error);
+            return { success: false, error: (error as Error)?.message || 'Unknown error' };
+        }
+    }
+
+    /**
+     * 获取页面块内容
+     */
     async getPageBlocks(pageId: string, startCursor?: string): Promise<NotionBlock[]> {
 		let url = `/blocks/${pageId}/children`;
 		if (startCursor) {
@@ -277,6 +314,26 @@ export class NotionApiService {
      * 使用 remark 将 Markdown 转为 Notion Blocks，并在过程中解析本地资源→file_upload
      */
     private async mdToBlocks(markdown: string, sourceDir?: string): Promise<NotionBlock[]> {
+        // 去掉开头的 YAML front matter，Notion 只发布正文
+        const stripFrontMatter = (md: string): string => {
+            if (!md) return md;
+            // 支持开头为 --- 或 \ufeff---（带 BOM）
+            const starts = md.startsWith('---') || md.startsWith('\ufeff---');
+            if (!starts) return md;
+            const lines = md.split(/\r?\n/);
+            if (lines[0].trim() !== '---' && lines[0].replace('\ufeff', '').trim() !== '---') return md;
+            let end = -1;
+            for (let i = 1; i < Math.min(lines.length, 500); i++) {
+                if (lines[i].trim() === '---') { end = i; break; }
+            }
+            if (end === -1) return md; // 不成对就不剥离
+            const body = lines.slice(end + 1).join('\n');
+            Debug.log('[Notion] Front matter stripped');
+            return body;
+        };
+
+        const mdNoFm = stripFrontMatter(markdown);
+
         const resolver = async (src: string) => {
             let abs: string | null = null;
             if (src.startsWith('/')) {
@@ -291,7 +348,107 @@ export class NotionApiService {
             const isImage = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.avif'].includes(ext);
             return { kind: (isImage ? 'image' : 'file'), uploadId };
         };
-        return await convertMarkdownToBlocks(markdown, { resolveLocalAsset: resolver as any });
+        const blocks = await convertMarkdownToBlocks(mdNoFm, { resolveLocalAsset: resolver as any });
+        return blocks as NotionBlock[];
+    }
+
+    /**
+     * 二次兜底：若某些 table 仍只有表头（<=1 行），基于整篇 Markdown 做全局恢复。
+     * 这样即使 remark 的位置信息不可用，也能尽量把数据行补齐。
+     */
+    private repairTablesFromMarkdown(blocks: NotionBlock[], markdown: string): NotionBlock[] {
+        if (!Array.isArray(blocks) || !markdown) return blocks;
+        // 简单的“pipe 表格段落”切分（连续带竖线的行构成一个段落）
+        const lines = markdown.split(/\r?\n/);
+        const segments: string[][] = [];
+        let cur: string[] = [];
+        const isSep = (ln: string) => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test((ln || '').trim());
+        const isRow = (ln: string) => !!ln && ln.includes('|');
+
+        for (const ln of lines) {
+            if (isRow(ln)) cur.push(ln); else { if (cur.length) { segments.push(cur); cur = []; } }
+        }
+        if (cur.length) segments.push(cur);
+
+        const splitByUnescapedPipes = (line: string): string[] => {
+            const parts: string[] = [];
+            let acc = '';
+            let escaped = false;
+            let inCode = false;
+            let wikiDepth = 0;
+            for (let i = 0; i < line.length; i++) {
+                const ch = line[i];
+                const next = line[i + 1];
+                if (escaped) { acc += ch; escaped = false; continue; }
+                if (ch === '\\') { escaped = true; continue; }
+                if (ch === '`') { inCode = !inCode; acc += ch; continue; }
+                if (ch === '[' && next === '[') { wikiDepth++; acc += ch; continue; }
+                if (ch === ']' && next === ']') { wikiDepth = Math.max(0, wikiDepth - 1); acc += ch; continue; }
+                if (ch === '|' && !inCode && wikiDepth === 0) { parts.push(acc); acc = ''; continue; }
+                acc += ch;
+            }
+            parts.push(acc);
+            return parts;
+        };
+
+        const buildRowsFromRawLines = (segLines: string[], expectedWidth: number): any[] => {
+            const rows: any[] = [];
+            for (const raw of segLines) {
+                if (!raw) continue;
+                const trimmed = raw.trim();
+                if (isSep(trimmed)) continue;
+                let cells = splitByUnescapedPipes(raw).map(s => s.trim());
+                if (cells[0] === '') cells.shift();
+                if (cells.length && cells[cells.length - 1] === '') cells.pop();
+                const width = expectedWidth || cells.length || 1;
+                if (cells.length > width) cells.length = width;
+                while (cells.length < width) cells.push('');
+                const row: any = { object: 'block', type: 'table_row', table_row: { cells: cells.map(txt => [{
+                    type: 'text', text: { content: txt }, plain_text: txt,
+                    annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' }
+                }]) } };
+                rows.push(row);
+            }
+            return rows;
+        };
+
+        const norm = (s: string) => (s || '').replace(/\s+/g, '');
+
+        blocks.forEach((b: any, idx: number) => {
+            if (!b || b.type !== 'table' || !b.table) return;
+            const table = b.table;
+            const current = Array.isArray(table.children) ? table.children : [];
+            if (current.length > 1) return; // 已经有数据行
+
+            const width = table.table_width || (current[0]?.table_row?.cells?.length ?? 1) || 1;
+            const headerCells = (current[0]?.table_row?.cells || []).map((cell: any[]) => (cell?.[0]?.plain_text ?? '').trim());
+            const expected = headerCells.map(norm);
+            if (expected.length === 0) return;
+
+            // 在所有候选段落里按表头文本精确匹配
+            for (const seg of segments) {
+                if (seg.length === 0) continue;
+                const headerLine = isSep(seg[0]) && seg.length > 1 ? seg[1] : seg[0];
+                if (!headerLine) continue;
+                let cells = splitByUnescapedPipes(headerLine).map(s => s.trim());
+                if (cells[0] === '') cells.shift();
+                if (cells.length && cells[cells.length - 1] === '') cells.pop();
+                while (cells.length < width) cells.push('');
+                if (cells.length > width) cells.length = width;
+                const normalized = cells.map(norm);
+                const match = normalized.length === expected.length && normalized.every((v, i) => v === expected[i]);
+                if (!match) continue;
+
+                const recovered = buildRowsFromRawLines(seg, width);
+                Debug.log(`[Notion] Global table recovery hit at block#${idx}: recoveredRows=${recovered.length}`);
+                if (recovered.length > current.length) {
+                    table.children = recovered as any;
+                }
+                break;
+            }
+        });
+
+        return blocks;
     }
 
     /**
@@ -302,8 +459,8 @@ export class NotionApiService {
     private async appendBlockChildren(pageId: string, children: NotionBlock[]): Promise<void> {
         Debug.log(`[Notion] appendBlockChildren: adding ${children.length} children to block ${pageId}`);
         const allTableRows = children.length > 0 && children.every((c: any) => c?.type === 'table_row');
-        // 对表格行默认更小的初始批次，避免大表触发 413/429
-        let batchSize = allTableRows ? Math.min(20, MAX_CHILDREN_PER_REQ) : Math.min(MAX_CHILDREN_PER_REQ, Math.max(1, Math.ceil(children.length / Math.ceil(children.length / MAX_CHILDREN_PER_REQ))));
+        // 对表格行使用更小默认批次，避免大表触发 413/429
+        let batchSize = allTableRows ? Math.min(TABLE_ROW_BATCH_SIZE_DEFAULT, MAX_CHILDREN_PER_REQ) : Math.min(MAX_CHILDREN_PER_REQ, Math.max(1, Math.ceil(children.length / Math.ceil(children.length / MAX_CHILDREN_PER_REQ))));
         const totalBatches = Math.ceil(children.length / batchSize);
 
         for (let start = 0, batchIndex = 0; start < children.length; start += batchSize, batchIndex++) {
@@ -422,14 +579,40 @@ export class NotionApiService {
             if (tbl?.id) {
                 const planRows = tablePlans.get(i) || [];
                 Debug.log(`[Notion] Table#${i} created: ${tbl.id}. Planned rows: ${planRows.length}`);
-                // 删除占位行
-                const existing = await this.getPageBlocks(tbl.id);
-                for (const block of existing) {
-                    if (block.type === 'table_row') await this.deleteBlock(block.id);
+
+                // 分批添加表格行（跳过表头，因为表头已经包含在空表格中）
+                if (planRows.length > 1) {
+                    const dataRows = planRows.slice(1); // 跳过表头
+                    const batchSize = Math.min(TABLE_ROW_BATCH_SIZE_DEFAULT, MAX_CHILDREN_PER_REQ); // 表格行使用更小的批次
+                    const totalBatches = Math.ceil(dataRows.length / batchSize);
+
+                    Debug.log(`[Notion] Adding ${dataRows.length} data rows in ${totalBatches} batches (batch size: ${batchSize})`);
+
+                    for (let start = 0, batchIndex = 0; start < dataRows.length; start += batchSize, batchIndex++) {
+                        const batch = dataRows.slice(start, start + batchSize);
+                        Debug.log(`[Notion] Processing table row batch ${batchIndex + 1}/${totalBatches} with ${batch.length} rows`);
+
+                        try {
+                            await this.makeRequest(`/blocks/${tbl.id}/children`, 'PATCH', { children: batch });
+                            Debug.log(`[Notion] Table row batch ${batchIndex + 1} successful`);
+                        } catch (err) {
+                            const msg = (err as Error)?.message || '';
+                            Debug.error(`[Notion] Table row batch ${batchIndex + 1} failed: ${msg}`);
+
+                            // 兼容部分工作区 PATCH 不可用的情况，切换为 POST
+                            if (/invalid_request_url|405|method/i.test(msg) || /\b400\b/.test(msg)) {
+                                Debug.log(`[Notion] Retrying table row batch ${batchIndex + 1} with POST method`);
+                                await this.makeRequest(`/blocks/${tbl.id}/children`, 'POST', { children: batch });
+                            } else {
+                                throw err;
+                            }
+                        }
+
+                        // 降低触发 429 的概率
+                        await sleep(INTER_REQUEST_DELAY_MS);
+                    }
+                    Debug.log(`[Notion] Successfully added all ${dataRows.length} table rows to table ${tbl.id}`);
                 }
-                // 追加实际行
-                await this.appendBlockChildren(tbl.id, planRows as any);
-                Debug.log(`[Notion] Table rows appended: ${planRows.length}`);
                 await sleep(INTER_REQUEST_DELAY_MS);
             } else {
                 Debug.warn('[Notion] Unable to obtain created table id; rows will be skipped for this table.');
@@ -441,7 +624,7 @@ export class NotionApiService {
     }
 
     /**
-     * 从块列表中提取 table 的行，避免单请求超过 children 最大限制
+     * 从块列表中提取 table 的行，使用成功的分批处理方法
      */
     private prepareBlocksForAppend(blocks: any[]): { prepared: any[]; tablePlans: Map<number, any[]> } {
         const prepared: any[] = [];
@@ -461,22 +644,24 @@ export class NotionApiService {
                 // 提取表格行到单独的计划中
                 plans.set(idx, b.table.children);
 
-                // 创建表格块的副本，总是包含至少一个空行以满足API验证
-                // 实际的行数据会在后续步骤中从tablePlans添加
+                // 创建表格块的副本，只包含表头行以满足API验证
+                // 实际的行数据会在后续步骤中从tablePlans分批添加
                 const clone = {
                     ...b,
                     table: {
                         ...b.table,
-                        children: [
-                            // 添加一个空行以满足API要求（table.children.length ≥ 1）
-                            {
-                                object: 'block',
-                                type: 'table_row',
-                                table_row: {
-                                    cells: Array(b.table.table_width || 1).fill([])
+                        children: b.table.children.length > 0
+                            ? [b.table.children[0]] // 只包含表头
+                            : [
+                                // 如果没有任何行，添加一个空行作为表头
+                                {
+                                    object: 'block',
+                                    type: 'table_row',
+                                    table_row: {
+                                        cells: Array(b.table.table_width || 1).fill([])
+                                    }
                                 }
-                            }
-                        ]
+                            ]
                     }
                 };
                 prepared.push(clone);
@@ -761,8 +946,12 @@ export class NotionApiService {
             }
 
             Debug.log(`[Notion] Converting markdown to blocks...`);
-            const blocks = await this.mdToBlocks(markdown, (context as any).sourceDir);
+            let blocks = await this.mdToBlocks(markdown, (context as any).sourceDir);
             Debug.log(`[Notion] Converted ${blocks.length} blocks`);
+            // 全局兜底修复只含表头的表格
+            blocks = this.repairTablesFromMarkdown(blocks, markdown);
+            const tblInfoNew = (blocks as any[]).filter(b => (b as any)?.type === 'table').map((t: any) => t?.table?.children?.length ?? 0).join(',');
+            Debug.log(`[Notion] After repair, table rows per block: [${tblInfoNew}]`);
 
             const { prepared, tablePlans } = this.prepareBlocksForAppend(blocks as any[]);
             Debug.log(`[Notion] Prepared ${prepared.length} blocks for append, table plans: ${tablePlans.size}`);

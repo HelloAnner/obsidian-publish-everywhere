@@ -217,15 +217,31 @@ export async function convertMarkdownToBlocks(markdown: string, options: Convert
                 tableBlock.table.children.push(row);
             }
 
-            // Fallback：当 remark 仅解析出表头（children <= 1）但源码疑似为大表格时，基于源码片段恢复行
+            // 增强的表格恢复：当 remark 解析的行数不足时，基于源码片段恢复表格
             try {
                 const pos = (node as any)?.position;
-                if ((tableBlock.table.children?.length || 0) <= 1 && pos && typeof pos.start?.offset === 'number' && typeof pos.end?.offset === 'number') {
+                if (pos && typeof pos.start?.offset === 'number' && typeof pos.end?.offset === 'number') {
                     const recovered = recoverPipeTableRowsAroundPosition(markdown, pos, width);
-                    Debug.log(`[MD->Notion] table fallback: astRows=${rows?.length ?? 0}, recoveredRows=${recovered.length}, width=${width}`);
-                    if (recovered.length > 1) tableBlock.table.children = recovered;
+                    Debug.log(`[Notion] [MD->Notion] table fallback: astRows=${rows?.length ?? 0}, recoveredRows=${recovered.length}, width=${width}`);
+
+                    // 如果恢复的行数更多，使用恢复的行
+                    if (recovered.length > tableBlock.table.children.length) {
+                        tableBlock.table.children = recovered;
+                    }
                 }
-            } catch { /* 忽略兜底恢复出错，不影响主流程 */ }
+                // 二次兜底：若仍然只有表头（<=1行），尝试基于表头文本在整篇Markdown中全局恢复
+                if ((tableBlock.table.children?.length || 0) <= 1) {
+                    const headerTexts = (tableBlock.table.children?.[0]?.table_row?.cells || [])
+                        .map((cell: any[]) => (cell?.[0]?.plain_text ?? '').trim());
+                    const globalRecovered = recoverPipeTableRowsGlobally(markdown, width, headerTexts);
+                    Debug.log(`[Notion] [MD->Notion] global table recovery: headerCells=${JSON.stringify(headerTexts)}, recoveredRows=${globalRecovered.length}`);
+                    if (globalRecovered.length > tableBlock.table.children.length) {
+                        tableBlock.table.children = globalRecovered;
+                    }
+                }
+            } catch (error) {
+                Debug.warn(`[Notion] [MD->Notion] Table recovery failed: ${error}`);
+            }
             blocks.push(tableBlock);
         },
         image: async (node) => {
@@ -406,37 +422,79 @@ function recoverPipeTableRowsFromMarkdown(segment: string, expectedWidth: number
     return result.length >= 2 ? result : result;
 }
 
-// 从整篇 markdown 的位置附近恢复 pipe 表格，避免 AST position 只覆盖表头时抓不到数据行
+// 从整篇 markdown 的位置附近恢复 pipe 表格，兼容没有分隔符行的表格
 function recoverPipeTableRowsAroundPosition(markdown: string, pos: any, expectedWidth: number): any[] {
     const lines = markdown.split(/\r?\n/);
     const start = Math.max(0, (pos?.start?.line ?? 1) - 1);
-    // 向下扫描，抓取 header 行、分隔行、以及后续连续的表格行
+
+    // 找到表头行
     let headerIndex = start;
-    // 跳过起始处的非表格行（极端情况下 position 指到表头前一行）
     while (headerIndex < lines.length && !/[|]/.test(lines[headerIndex])) headerIndex++;
     if (headerIndex >= lines.length) return [];
 
+    // 尝试找到分隔行
     let sepIndex = -1;
     for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 10); i++) {
         const ln = lines[i]?.trim();
         if (!ln) continue;
-        if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln) || (ln.includes('|') && /-{3,}/.test(ln))) { sepIndex = i; break; }
+
+        // 检查是否是分隔行
+        if (/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln) || (ln.includes('|') && /-{3,}/.test(ln))) {
+            sepIndex = i;
+            break;
+        }
+
+        // 如果没有分隔行，但下一行看起来像表格数据行，则直接开始收集数据
+        if (ln.includes('|') && !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln)) {
+            // 这可能是没有分隔符行的表格
+            sepIndex = headerIndex; // 将表头行作为分隔行
+            break;
+        }
+
         // 若很快遇到非表格样式，则失败
         if (!ln.includes('|')) break;
     }
-    if (sepIndex === -1) return [];
+
+    // 如果没有找到分隔行，但表头后面有表格数据行，直接收集
+    if (sepIndex === -1) {
+        // 检查表头后面是否有表格数据行
+        let hasTableData = false;
+        for (let i = headerIndex + 1; i < Math.min(lines.length, headerIndex + 5); i++) {
+            const ln = lines[i]?.trim();
+            if (ln && ln.includes('|') && !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln)) {
+                hasTableData = true;
+                break;
+            }
+        }
+
+        if (hasTableData) {
+            sepIndex = headerIndex; // 将表头行作为分隔行
+        } else {
+            return [];
+        }
+    }
 
     const collected: string[] = [];
     // 包含表头行
     collected.push(lines[headerIndex] ?? '');
-    // 向下收集数据行，直到遇到空行或明显非表格行
-    for (let i = sepIndex + 1; i < lines.length; i++) {
+
+    // 收集数据行
+    const dataStartIndex = sepIndex === headerIndex ? headerIndex + 1 : sepIndex + 1;
+    for (let i = dataStartIndex; i < lines.length; i++) {
         const ln = lines[i];
         if (!ln) break;
-        // 非表格行结束
-        if (!ln.includes('|')) break;
-        collected.push(ln);
+
+        // 检查是否是表格行（包含竖线且不是分隔行）
+        const isTableRow = ln.includes('|') && !/^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test(ln.trim());
+
+        if (isTableRow) {
+            collected.push(ln);
+        } else {
+            // 遇到非表格行，停止收集
+            break;
+        }
     }
+
     return buildRowsFromRawLines(collected, expectedWidth);
 }
 
@@ -484,4 +542,44 @@ function buildRowsFromRawLines(lines: string[], expectedWidth: number): any[] {
         rows.push(row);
     }
     return rows;
+}
+
+// 全局恢复：根据表头文本在整篇 Markdown 中寻找匹配的 pipe 表格并恢复
+function recoverPipeTableRowsGlobally(markdown: string, expectedWidth: number, expectedHeader: string[]): any[] {
+    try {
+        if (!expectedHeader || expectedHeader.length === 0) return [];
+        const lines = markdown.split(/\r?\n/);
+        // 归一化比较（去空白）
+        const norm = (s: string) => (s || '').replace(/\s+/g, '');
+        const expected = expectedHeader.map(norm);
+
+        const segments: string[][] = [];
+        let cur: string[] = [];
+        const isSep = (ln: string) => /^\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?$/.test((ln || '').trim());
+        const isRow = (ln: string) => !!ln && ln.includes('|');
+
+        for (const ln of lines) {
+            if (isRow(ln)) cur.push(ln); else { if (cur.length) { segments.push(cur); cur = []; } }
+        }
+        if (cur.length) segments.push(cur);
+
+        for (const seg of segments) {
+            if (seg.length === 0) continue;
+            const headerLine = isSep(seg[0]) && seg.length > 1 ? seg[1] : seg[0];
+            if (!headerLine) continue;
+            let headerCells = splitByUnescapedPipes(headerLine).map(s => s.trim());
+            if (headerCells[0] === '') headerCells.shift();
+            if (headerCells.length && headerCells[headerCells.length - 1] === '') headerCells.pop();
+            while (headerCells.length < expectedWidth) headerCells.push('');
+            if (headerCells.length > expectedWidth) headerCells.length = expectedWidth;
+
+            const normalized = headerCells.map(norm);
+            const match = normalized.length === expected.length && normalized.every((v, i) => v === expected[i]);
+            if (!match) continue;
+
+            // 命中：用这个段落恢复
+            return buildRowsFromRawLines(seg, expectedWidth);
+        }
+    } catch { /* ignore */ }
+    return [];
 }
