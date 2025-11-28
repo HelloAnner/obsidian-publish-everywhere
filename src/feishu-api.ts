@@ -6537,7 +6537,7 @@ export class FeishuApiService {
 		const style = baseStyle ? { ...baseStyle } : {};
 		if (highlightColor !== undefined) {
 			// 使用飞书正确的 text_highlight_color_class 属性
-			style.text_highlight_color_class = this.HIGHLIGHT_COLOR_CLASSES[highlightColor] || this.HIGHLIGHT_COLOR_CLASSES[this.DEFAULT_HIGHLIGHT_COLOR];
+			style.text_highlight_color_class = (this.HIGHLIGHT_COLOR_CLASSES as any)[highlightColor] || (this.HIGHLIGHT_COLOR_CLASSES as any)[this.DEFAULT_HIGHLIGHT_COLOR];
 		}
 		if (Object.keys(style).length === 0) {
 			return {

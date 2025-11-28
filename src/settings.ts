@@ -344,9 +344,12 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 				});
 		}
 
+        // Notion 设置部分
+        containerEl.createEl('hr');
+        containerEl.createEl('h2', { text: 'Notion 发布设置' });
+        this.renderNotionSettings(containerEl);
 
-
-		// 使用说明部分
+        // 使用说明部分
 	containerEl.createEl('h3', { text: '📖 使用说明' });
 
 	const usageEl = containerEl.createDiv('setting-item-description');
@@ -491,6 +494,212 @@ private renderConfluenceSettings(containerEl: HTMLElement) {
 				await this.plugin.saveSettings();
 			}));
 }
+
+    private renderNotionSettings(containerEl: HTMLElement) {
+		const desc = containerEl.createDiv('setting-item-description');
+		desc.createEl('p', { text: '集成 Notion API，支持将文档发布到 Notion 数据库或页面。' });
+
+		// API Token
+		new Setting(containerEl)
+			.setName('Notion API Token')
+			.setDesc('从 Notion Integrations 页面获取的内部集成令牌')
+			.addText((text: TextComponent) => {
+				text.setPlaceholder('secret_...')
+					.setValue(this.plugin.settings.notionApiToken)
+					.onChange(async (value: string) => {
+						this.plugin.settings.notionApiToken = value.trim();
+						await this.plugin.saveSettings();
+						this.updateNotionAuthStatus(containerEl);
+					});
+				text.inputEl.type = 'password';
+			});
+
+		// 工作空间信息
+		new Setting(containerEl)
+			.setName('工作空间 ID')
+			.setDesc('Notion 工作空间的 ID（可选，留空则使用默认）')
+			.addText(text => text
+				.setPlaceholder('工作空间 ID（可选）')
+				.setValue(this.plugin.settings.notionWorkspaceId || '')
+				.onChange(async (value: string) => {
+					this.plugin.settings.notionWorkspaceId = value.trim() || undefined;
+					await this.plugin.saveSettings();
+				}));
+
+		// 目标数据库
+		new Setting(containerEl)
+			.setName('目标数据库 ID')
+			.setDesc('发布文档的目标 Notion 数据库 ID（可选，留空则创建独立页面）')
+			.addText(text => text
+				.setPlaceholder('目标数据库 ID（可选）')
+				.setValue(this.plugin.settings.notionTargetDatabaseId || '')
+				.onChange(async (value: string) => {
+					this.plugin.settings.notionTargetDatabaseId = value.trim() || undefined;
+					await this.plugin.saveSettings();
+				}));
+
+		// 页面标题属性
+		new Setting(containerEl)
+			.setName('页面标题属性')
+			.setDesc('Notion 数据库中用于存储页面标题的属性名（可选）')
+			.addText(text => text
+				.setPlaceholder('Name')
+				.setValue(this.plugin.settings.notionPageTitleProperty || 'Name')
+				.onChange(async (value: string) => {
+					this.plugin.settings.notionPageTitleProperty = value.trim() || 'Name';
+					await this.plugin.saveSettings();
+				}));
+
+		// 页面标签属性
+		new Setting(containerEl)
+			.setName('页面标签属性')
+			.setDesc('Notion 数据库中用于存储页面标签的属性名（可选）')
+			.addText(text => text
+				.setPlaceholder('Tags')
+				.setValue(this.plugin.settings.notionPageTagsProperty || 'Tags')
+				.onChange(async (value: string) => {
+					this.plugin.settings.notionPageTagsProperty = value.trim() || 'Tags';
+					await this.plugin.saveSettings();
+				}));
+
+		// 发布选项标题
+		containerEl.createEl('h4', { text: '📋 发布选项' });
+
+		// 创建新页面
+		new Setting(containerEl)
+			.setName('创建新页面（如果不存在）')
+			.setDesc('当找不到同名页面时，自动创建新页面')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.notionCreateNewIfNotExists !== false)
+				.onChange(async (value: boolean) => {
+					this.plugin.settings.notionCreateNewIfNotExists = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// 更新现有页面
+		new Setting(containerEl)
+			.setName('更新现有页面')
+			.setDesc('如果找到同名页面，更新其内容而不是创建新的')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.notionUpdateExistingPages !== false)
+				.onChange(async (value: boolean) => {
+					this.plugin.settings.notionUpdateExistingPages = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// 内容处理选项标题
+		containerEl.createEl('h4', { text: '🔧 内容处理' });
+
+		// 启用子文档处理
+		new Setting(containerEl)
+			.setName('启用子文档处理')
+			.setDesc('处理 Obsidian 双链引用的子文档')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableNotionSubDocumentUpload !== false)
+				.onChange(async (value: boolean) => {
+					this.plugin.settings.enableNotionSubDocumentUpload = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// 启用图片上传
+		new Setting(containerEl)
+			.setName('启用图片上传')
+			.setDesc('将本地图片上传到 Notion')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableNotionImageUpload !== false)
+				.onChange(async (value: boolean) => {
+					this.plugin.settings.enableNotionImageUpload = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// 启用附件上传
+		new Setting(containerEl)
+			.setName('启用附件上传')
+			.setDesc('将本地附件上传到 Notion')
+			.addToggle(toggle => toggle
+				.setValue(this.plugin.settings.enableNotionAttachmentUpload !== false)
+				.onChange(async (value: boolean) => {
+					this.plugin.settings.enableNotionAttachmentUpload = value;
+					await this.plugin.saveSettings();
+				}));
+
+		// 默认页面图标
+		new Setting(containerEl)
+			.setName('默认页面图标')
+			.setDesc('新创建页面的默认图标（emoji 或 URL）')
+			.addText(text => text
+				.setPlaceholder('📝 或 https://example.com/icon.png')
+				.setValue(this.plugin.settings.notionDefaultPageIcon || '')
+				.onChange(async (value: string) => {
+					this.plugin.settings.notionDefaultPageIcon = value.trim() || undefined;
+					await this.plugin.saveSettings();
+				}));
+
+		// 授权状态部分
+		containerEl.createEl('h4', { text: '🔐 授权状态' });
+		this.updateNotionAuthStatus(containerEl);
+
+		// 测试连接按钮
+		new Setting(containerEl)
+			.setName('测试 Notion 连接')
+			.setDesc('验证 API Token 是否有效并获取工作空间信息')
+			.addButton(button => button
+				.setButtonText('测试连接')
+				.setCta()
+				.onClick(async () => {
+					await this.testNotionConnection();
+				}));
+	}
+
+    private updateNotionAuthStatus(containerEl: HTMLElement) {
+		// 查找现有的授权状态元素
+		let statusEl = containerEl.querySelector('.notion-auth-status');
+		if (!statusEl) {
+			statusEl = containerEl.createDiv('notion-auth-status');
+		}
+
+		statusEl.empty();
+		const statusInfo = statusEl.createDiv('setting-item-info');
+		statusInfo.createDiv('setting-item-name').setText('Notion 授权状态');
+
+		const statusDesc = statusInfo.createDiv('setting-item-description');
+		if (this.plugin.settings.notionApiToken) {
+			// 简单验证 token 格式
+			const isValidFormat = this.plugin.settings.notionApiToken.startsWith('secret_');
+			if (isValidFormat) {
+				const statusSpan = statusDesc.createEl('span', { text: '✅ 已配置' });
+				statusSpan.addClass('mod-success');
+			} else {
+				const statusSpan = statusDesc.createEl('span', { text: '⚠️ Token 格式可能不正确' });
+				statusSpan.addClass('mod-warning');
+			}
+		} else {
+			const statusSpan = statusDesc.createEl('span', { text: '❌ 未配置' });
+			statusSpan.addClass('mod-warning');
+		}
+	}
+
+	private async testNotionConnection() {
+		if (!this.plugin.settings.notionApiToken) {
+			new Notice('请先配置 Notion API Token');
+			return;
+		}
+
+		try {
+			new Notice('🔄 正在测试 Notion 连接...');
+
+			// 启用实际的连接测试
+			const result = await this.plugin.notionApi.testConnection();
+
+			if (result.success) {
+				new Notice(`✅ Notion 连接测试成功！用户: ${result.userInfo?.name || '未知'}`);
+			} else {
+				new Notice(`❌ Notion 连接测试失败: ${result.error}`);
+			}
+		} catch (error) {
+			new Notice(`❌ Notion 连接测试失败: ${error}`);
+		}
+	}
 
 private addAuthorSection(containerEl: HTMLElement) {
 	// 添加分隔线

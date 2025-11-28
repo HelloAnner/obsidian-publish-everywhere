@@ -1,9 +1,10 @@
 import { Plugin, Notice, TFile, Menu, Editor, MarkdownView, requestUrl } from 'obsidian';
 import { exec } from 'child_process';
 import * as path from 'path';
-import { FeishuSettings, ShareResult } from './src/types';
+import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE } from './src/constants';
 import { FeishuApiService } from './src/feishu-api';
+import { NotionApiService } from './src/notion-api';
 import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
 import { Debug } from './src/debug';
@@ -22,7 +23,7 @@ interface ProcessResult {
 	stderr: string;
 }
 
-type PublishEverywhereSettings = FeishuSettings & ConfluencePublisherSettings;
+type PublishEverywhereSettings = FeishuSettings & ConfluencePublisherSettings & NotionSettings;
 
 const DEFAULT_CONFLUENCE_SETTINGS: ConfluencePublisherSettings = {
 	confluenceUrl: '',
@@ -40,6 +41,7 @@ const DEFAULT_SETTINGS: PublishEverywhereSettings = {
 export default class PublishEverywherePlugin extends Plugin {
 	settings: PublishEverywhereSettings;
 	feishuApi: FeishuApiService;
+	notionApi: NotionApiService;
 	markdownProcessor: MarkdownProcessor;
 	publishQueue: CallbackPublishQueue;
 
@@ -49,6 +51,7 @@ export default class PublishEverywherePlugin extends Plugin {
 
 		// 初始化服务
 		this.feishuApi = new FeishuApiService(this.settings, this.app);
+		this.notionApi = new NotionApiService(this.settings, this.app);
 		this.markdownProcessor = new MarkdownProcessor(this.app);
 
 		// 初始化发布队列
@@ -139,6 +142,49 @@ export default class PublishEverywherePlugin extends Plugin {
 				}
 			]
 		});
+
+		// 添加 Notion 相关命令
+		this.addCommand({
+			id: 'publish-to-notion',
+			name: '发布到Notion',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+                        this.publishCurrentNoteToNotion(markdownView as MarkdownView);
+					}
+					return true;
+				}
+				return false;
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Shift'],
+					key: 'n'
+				}
+			]
+		});
+
+		this.addCommand({
+			id: 'publish-to-all-platforms-with-notion',
+			name: '🚀 发布到所有平台（含Notion）',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+                        this.publishToAllPlatforms();
+					}
+					return true;
+				}
+				return false;
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Ctrl', 'Shift'],
+					key: 'p'
+				}
+			]
+		});
 	}
 
 	/**
@@ -156,6 +202,18 @@ export default class PublishEverywherePlugin extends Plugin {
 							.onClick(() => {
 								this.shareFile(file);
 							});
+					});
+
+					// 添加 Notion 分享选项
+					menu.addItem((item) => {
+						item
+							.setTitle('📝 分享到Notion')
+							.setIcon('notion')
+                        .onClick(() => {
+                            const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
+                            if (mv) this.publishCurrentNoteToNotion(mv);
+                            else new Notice('No file is currently open');
+                        });
 					});
 				}
 			})
@@ -228,6 +286,103 @@ export default class PublishEverywherePlugin extends Plugin {
 			new Notice('❌ 无效的授权回调');
 		}
 	}
+
+	/**
+	 * 发布当前笔记到Notion（使用notion属性指定父页面）
+	 * @param view Markdown视图
+	 */
+    async publishCurrentNoteToNotion(view: MarkdownView): Promise<void> {
+        const file = view.file;
+        if (!file) {
+            this.log('[Publish to Notion] No active file', 'error');
+            new Notice('No file is currently open');
+            return;
+        }
+
+        // 检查配置
+        if (!this.settings.notionApiToken) {
+            this.log('[Publish to Notion] Missing Notion API Token', 'error');
+            new Notice('请先完成 Notion 配置');
+            return;
+        }
+
+        try {
+            const title = file.basename;
+            new Notice('⏳ 正在发布到 Notion...');
+
+            // 读取文件内容
+            await this.ensureFileSaved(file);
+            const rawContent = await this.app.vault.read(file);
+
+            // frontmatter 中解析 parent 页面
+            const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
+            let parentPageId: string | undefined = undefined;
+            if (fm?.notion) {
+                const maybe = this.notionApi.parseNotionPageIdFromUrl(String(fm.notion));
+                if (maybe) parentPageId = maybe;
+            }
+
+            // 构造源文件所在目录（用于解析相对路径的本地资源）
+            const vaultPath = (this.app.vault.adapter as any).basePath;
+            const absoluteFilePath = path.join(vaultPath, file.path);
+            const sourceDir = path.dirname(absoluteFilePath);
+
+            // 处理 Markdown 内容，移除 front matter
+            const processor = new MarkdownProcessor(this.app);
+            const processedResult = processor.processCompleteWithFiles(
+                rawContent,
+                3, // maxDepth
+                'remove', // frontMatterHandling: remove front matter
+                true, // enableSubDocumentUpload
+                true, // enableLocalImageUpload
+                true, // enableLocalAttachmentUpload
+                'filename', // titleSource
+                [] // codeBlockFilterLanguages
+            );
+
+            // 发布到 Notion（内部完成 Markdown→Blocks 与文件上传）
+            const result = await this.notionApi.publishDocument(title, processedResult.content, {
+                apiToken: this.settings.notionApiToken as any,
+                targetDatabaseId: this.settings.notionTargetDatabaseId,
+                workspaceId: this.settings.notionWorkspaceId,
+                pageTitleProperty: this.settings.notionPageTitleProperty,
+                pageTagsProperty: this.settings.notionPageTagsProperty,
+                pageStatusProperty: this.settings.notionPageStatusProperty,
+                createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
+                updateExistingPages: this.settings.notionUpdateExistingPages !== false,
+                defaultPageIcon: this.settings.notionDefaultPageIcon,
+                parentPageId,
+                sourceDir,
+            });
+
+			if (result.success) {
+				new Notice('✅ 发布到 Notion 成功！');
+
+				// 更新 front matter 中的 notion_url
+				await this.updateNotionUrlInFrontMatter(file, result.url!, result.pageId!);
+
+				// 复制链接到剪贴板
+				if (this.settings.simpleSuccessNotice) {
+					await navigator.clipboard.writeText(result.url!);
+					new Notice(`🔗 已复制 Notion 链接到剪贴板`);
+				}
+			} else {
+				this.log(`[Publish to Notion] Failed: ${result.error}`, 'error');
+				new Notice(`❌ 发布到 Notion 失败: ${result.error}`);
+			}
+		} catch (error) {
+			this.handleError(error as Error, 'Notion发布');
+		}
+	}
+
+	/**
+	 * 更新 Notion URL 在 front matter
+	 */
+    private async updateNotionUrlInFrontMatter(file: TFile, notionUrl: string, pageId: string): Promise<void> {
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+            (fm as any).notion_url = notionUrl;
+        });
+    }
 
 	/**
 	 * 发布当前笔记到飞书（使用feishu属性指定父页面）
@@ -927,7 +1082,7 @@ export default class PublishEverywherePlugin extends Plugin {
 		if (frontmatter.kms) {
 			try {
 				this.log('Publishing to KMS...');
-				await this.publishCurrentNoteToConfluenceInternal(view);
+                await this.publishCurrentNoteToConfluence(view);
 				results.push({ platform: 'KMS', success: true });
 				new Notice('✅ KMS 发布成功', 2000);
 			} catch (error) {
@@ -950,7 +1105,7 @@ export default class PublishEverywherePlugin extends Plugin {
 		if (frontmatter.feishu) {
 			try {
 				this.log('Publishing to Feishu...');
-				await this.publishCurrentNoteToFeishuInternal(view);
+                await this.publishCurrentNoteToFeishu(view);
 				results.push({ platform: '飞书', success: true });
 				new Notice('✅ 飞书发布成功', 2000);
 			} catch (error) {
@@ -1062,14 +1217,14 @@ export default class PublishEverywherePlugin extends Plugin {
 			switch (task.type) {
 				case 'feishu':
 					if (task.view) {
-						await this.publishCurrentNoteToFeishuInternal(task.view);
+                        await this.publishCurrentNoteToFeishu(task.view);
 					} else if (task.file) {
 						await this.shareFileInternal(task.file);
 					}
 					break;
 				case 'confluence':
 					if (task.view) {
-						await this.publishCurrentNoteToConfluenceInternal(task.view);
+                        await this.publishCurrentNoteToConfluence(task.view);
 					}
 					break;
 				case 'all':

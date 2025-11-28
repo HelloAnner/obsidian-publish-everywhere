@@ -1,5 +1,5 @@
 import { App, TFile, normalizePath } from 'obsidian';
-import { LocalFileInfo, MarkdownProcessResult, ProcessContext, FrontMatterData, CalloutInfo } from './types';
+import { LocalFileInfo, MarkdownProcessResult, ProcessContext, FrontMatterData, CalloutInfo, NotionProcessContext } from './types';
 import { Debug } from './debug';
 import { CALLOUT_TYPE_MAPPING } from './constants';
 
@@ -1228,4 +1228,280 @@ export class MarkdownProcessor {
 
 		return [...frontMatterLines, ...contentLines].join('\n');
 	}
+
+	// ==================== Notion 特定处理方法（迁移至 Notion API 服务） ====================
+
+	/**
+	 * 处理 Notion Callout 语法 [>INFO: 内容]
+	 */
+	private processNotionCallouts(content: string): string {
+		// 匹配 Notion style callouts
+		const calloutPattern = /^\[>([A-Z]+):\s*(.*)/gm;
+
+		return content.replace(calloutPattern, (match, type, calloutContent) => {
+			const iconMap: Record<string, string> = {
+				'INFO': '💡',
+				'WARNING': '⚠️',
+				'ERROR': '❌',
+				'SUCCESS': '✅',
+				'NOTE': '📝',
+				'TIP': '💡',
+				'IMPORTANT': '⭐',
+				'QUESTION': '❓',
+				'HELP': '🆘'
+			};
+
+			const emoji = iconMap[type.toUpperCase()] || '📝';
+			const placeholder = this.generatePlaceholder();
+
+			const calloutInfo: CalloutInfo = {
+				placeholder,
+				type: type.toLowerCase(),
+				title: type.charAt(0) + type.slice(1).toLowerCase(),
+				content: calloutContent.trim(),
+				foldable: false,
+				backgroundColor: 1, // 默认颜色
+				borderColor: 1,
+				textColor: 1,
+				emojiId: emoji
+			};
+
+			this.calloutBlocks.push(calloutInfo);
+			return `📱 ${type}: ${calloutContent.trim()} (Notion Callout)`;
+		});
+	}
+
+	/**
+	 * 处理 Notion 特定的表格格式
+	 */
+	private processNotionTables(content: string): string {
+		// Notion 支持更好的表格语法
+		// 这里可以添加特定的表格处理逻辑
+		return content;
+	}
+
+	/**
+	 * 处理 Notion 分栏语法
+	 */
+	private processNotionColumns(content: string): string {
+		// 匹配分栏语法 ---|---
+		const columnPattern = /\|---\|---/g;
+
+		return content.replace(columnPattern, '\n|---分栏开始---|\n');
+	}
+
+	/**
+	 * 处理 Notion 特定的引用语法
+	 */
+	private processNotionQuotes(content: string): string {
+		let processedContent = content;
+
+		// 处理多层引用为 Notion 兼容格式
+		// 处理 ">> 引用语法
+		processedContent = processedContent.replace(/^>>\s+(.+)$/gm, '> $1');
+
+		// 处理多层引用
+		const levels = ['>>>', '>>', '>'];
+		for (let i = 0; i < levels.length; i++) {
+			const pattern = new RegExp(`^${levels[i]}\\s+(.+)$`, 'gm');
+			const replacement = '>'.repeat(i + 1) + ' $1';
+			processedContent = processedContent.replace(pattern, replacement);
+		}
+
+		return processedContent;
+	}
+
+	/**
+	 * 处理 Notion 特定的列表语法
+	 */
+	private processNotionLists(content: string): string {
+		let processedContent = content;
+
+		// 处理待办事项 - [ ] 和 - [x]
+		processedContent = processedContent.replace(/^-\s+\[([ x])\]\s+(.+)$/gm, (match, status, text) => {
+			const checked = status === 'x';
+			const placeholder = this.generatePlaceholder();
+			const fileInfo: LocalFileInfo = {
+				originalPath: '',
+				fileName: '',
+				placeholder,
+				isImage: false,
+				isCallout: false,
+				altText: `${checked ? '✅' : '⬜'} ${text.trim()}`
+			};
+			this.localFiles.push(fileInfo);
+			return `${checked ? '✅' : '⬜'} ${text.trim()} (Todo)`;
+		});
+
+		// 处理折叠列表 - [ ] 和 - [x]
+		processedContent = processedContent.replace(/^-\s+\[([ x])\]\s+(.+)$/gm, (match, status, text) => {
+			const checked = status === 'x';
+			return `${checked ? '✅' : '⬜'} ${text.trim()}`;
+		});
+
+		return processedContent;
+	}
+
+	/**
+	 * 处理 Notion 特定的代码块语法
+	 */
+	private processNotionCodeBlocks(content: string): string {
+		// 支持更多的代码块语言
+		const enhancedLanguages = [
+			'javascript', 'typescript', 'python', 'java', 'cpp', 'c', 'go', 'rust',
+			'html', 'css', 'scss', 'sass', 'json', 'xml', 'yaml', 'yml',
+			'markdown', 'latex', 'sql', 'bash', 'shell', 'powershell', 'dockerfile',
+			'react', 'svelte', 'nextjs', 'nodejs', 'express',
+			'figma', 'sketch', 'xd', 'photoshop', 'illustrator', 'indesign',
+			'notion', 'airtable', 'coda', 'slack', 'discord', 'github'
+		];
+
+		// 检查并增强代码块
+		return content.replace(/```(\w+)?\n([\s\S]*?)\n```/g, (match, language, code) => {
+			const detectedLanguage = this.detectLanguage(code, language);
+			const enhancedLanguage = enhancedLanguages.includes(detectedLanguage) ? detectedLanguage : (language || '');
+			return `\`\`\`${enhancedLanguage}\n${code}\n\`\`\``;
+		});
+	}
+
+	/**
+	 * 检测编程语言
+	 */
+	private detectLanguage(code: string, suggested?: string): string {
+		if (suggested) return suggested;
+
+		// 简单的语言检测逻辑
+		if (code.includes('def ') && code.includes(':')) return 'python';
+		if (code.includes('function ') && code.includes('{')) return 'javascript';
+		if (code.includes('public class ') && code.includes('package ')) return 'java';
+		if (code.includes('#include') && code.includes('int main(')) return 'cpp';
+		if (code.includes('FROM ') && code.includes('RUN ')) return 'dockerfile';
+		if (code.includes('import React ') && code.includes('export')) return 'react';
+		if (code.includes('---') && code.includes('...')) return 'yaml';
+
+		return 'text';
+	}
+
+	/**
+	 * 处理 Notion 特定的图片语法
+	 */
+	private processNotionImages(content: string): string {
+		// 支持 Notion 特定的图片语法，如图片尺寸调整
+		return content.replace(/!\[\[([^\]]+)\]\]\(([^)]+)\)/g, (match, caption, url) => {
+			const placeholder = this.generatePlaceholder();
+			const fileInfo: LocalFileInfo = {
+				originalPath: url,
+				fileName: this.extractFileName(url),
+				placeholder,
+				isImage: true,
+				isCallout: false,
+				altText: caption || '',
+				displayWidth: undefined,
+				originalWidth: undefined,
+				originalHeight: undefined
+			};
+			this.localFiles.push(fileInfo);
+			return `🖼️ ${caption || url} (Notion Image)`;
+		});
+	}
+
+	/**
+	 * 处理 Notion 特定的链接语法
+	 */
+	private processNotionLinks(content: string): string {
+		// 处理 Notion 特定的链接语法，如页面链接
+		return content.replace(/\[([^\]]+)\]\(notion:\/\/([a-zA-Z0-9-]+)\)/g, (match, text, pageId) => {
+			return `📝 ${text} (Notion Page: ${pageId})`;
+		});
+	}
+
+	/**
+	 * 生成 Notion 兼容内容的页面属性
+	 */
+	generateNotionProperties(
+		frontMatter: FrontMatterData | null,
+		context?: NotionProcessContext
+	): Record<string, any> {
+		const properties: Record<string, any> = {};
+
+		// 基础标题属性
+		if (frontMatter?.title) {
+			properties[context?.pageTitleProperty || 'Name'] = {
+				title: [{ text: { content: frontMatter.title } }]
+			};
+		}
+
+		// 标签属性
+		if (frontMatter?.tags) {
+			const tags = Array.isArray(frontMatter.tags) ? frontMatter.tags :
+							typeof frontMatter.tags === 'string' ? frontMatter.tags.split(',') : [];
+
+			properties[context?.pageTagsProperty || 'Tags'] = {
+				multi_select: tags.map(tag => ({
+					name: tag
+				}))
+			};
+		}
+
+		// 状态属性
+		if (frontMatter?.status) {
+			properties[context?.pageStatusProperty || 'Status'] = {
+				select: {
+					name: frontMatter.status
+				}
+			};
+		}
+
+		// 其他自定义属性
+		if (frontMatter) {
+			for (const [key, value] of Object.entries(frontMatter)) {
+				if (['title', 'tags', 'status'].includes(key)) continue;
+
+				if (typeof value === 'string') {
+					properties[key] = {
+						rich_text: [{ text: { content: value } }]
+					};
+				} else if (typeof value === 'number') {
+					properties[key] = {
+						number: value
+					};
+				} else if (typeof value === 'boolean') {
+					properties[key] = {
+						checkbox: value
+					};
+				} else if (Array.isArray(value)) {
+					properties[key] = {
+						multi_select: value.map(item => ({
+							name: String(item)
+						}))
+					};
+				} else if (typeof value === 'object' && value !== null) {
+					properties[key] = {
+						rich_text: [{ text: { content: JSON.stringify(value) } }]
+					};
+				}
+			}
+		}
+
+		return properties;
+	}
+
+	/**
+	 * 清理 Notion 不支持的内容
+	 */
+    cleanupForNotion(content: string): string {
+        let cleanedContent = content;
+
+        // 移除潜在不安全或不支持的 HTML 标签（使用非贪婪匹配）
+        cleanedContent = cleanedContent.replace(/<script[\s\S]*?<\/script>/gi, '');
+        cleanedContent = cleanedContent.replace(/<style[\s\S]*?<\/style>/gi, '');
+
+        // 清理多余的空行
+        cleanedContent = cleanedContent.replace(/\n{3,}/g, '\n\n');
+
+        // 清理行首行尾空格
+        cleanedContent = cleanedContent.replace(/^\s+|\s+$/gm, '');
+
+        return cleanedContent.trim();
+    }
 }

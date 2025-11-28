@@ -4,7 +4,7 @@ import { Notice, TFile, MarkdownView } from 'obsidian';
  * 发布任务类型
  */
 export interface PublishTask {
-	type: 'feishu' | 'confluence' | 'all';
+	type: 'feishu' | 'confluence' | 'notion' | 'all';
 	file?: TFile;
 	view?: MarkdownView;
 }
@@ -65,10 +65,10 @@ export class PublishQueue {
 	/**
 	 * 执行任务（具体实现由外部插件类提供）
 	 */
-	private async executeTask(task: PublishTask): Promise<void> {
-		// 这个方法会在插件主类中被覆盖
-		throw new Error('executeTask 方法未实现');
-	}
+    protected async executeTask(task: PublishTask): Promise<void> {
+        // 这个方法会在插件主类中被覆盖
+        throw new Error('executeTask 方法未实现');
+    }
 
 	/**
 	 * 清空队列
