@@ -144,512 +144,90 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 
 		}
 
-		// 分享目标设置部分
-		containerEl.createEl('h3', { text: '🎯 分享目标设置' });
-
-		// 目标类型选择
-		new Setting(containerEl)
-			.setName('分享目标')
-			.setDesc('选择文档分享的目标位置')
-			.addDropdown(dropdown => {
-				dropdown
-					.addOption('drive', '云空间')
-					.addOption('wiki', '知识库')
-					.setValue(this.plugin.settings.targetType || 'drive')
-					.onChange(async (value: 'drive' | 'wiki') => {
-						this.plugin.settings.targetType = value;
-						await this.plugin.saveSettings();
-						this.plugin.feishuApi.updateSettings(this.plugin.settings);
-						this.display(); // 刷新界面以显示相应的设置项
-					});
-			});
-
-		// 根据目标类型显示不同的设置
-		if (this.plugin.settings.targetType === 'wiki') {
-			const info = containerEl.createDiv('setting-item-description');
-			info.createEl('strong', { text: '知识库发布说明' });
-			info.createEl('p', { text: '无需在设置中选择固定的知识库。请在每篇笔记的 Front Matter 中添加 `feishu: "https://your.feishu.cn/wiki/xxxxxxxx"`，插件会根据该链接解析父页面并发布到对应的知识库节点。' });
-			info.createEl('p', { text: '如果链接指向云空间（drive/folder），也会自动解析并发布到指定文件夹。' });
-		} else {
-			this.addDriveSettings(containerEl);
-		}
-
-		// 内容处理设置部分
-		containerEl.createEl('h3', { text: '📝 内容处理设置' });
-
-		// 文档标题来源设置
-		new Setting(containerEl)
-			.setName('文档标题来源')
-			.setDesc('选择生成的飞书文档标题使用哪个来源')
-			.addDropdown(dropdown => {
-				dropdown
-					.addOption('filename', '文件名 (Filename)')
-					.addOption('frontmatter', 'YAML Front Matter 的 "title" 属性')
-					.setValue(this.plugin.settings.titleSource)
-					.onChange(async (value: 'filename' | 'frontmatter') => {
-						this.plugin.settings.titleSource = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 文档属性（Front Matter）处理设置
-		new Setting(containerEl)
-			.setName('文档属性（Front Matter）')
-			.setDesc('选择如何处理笔记顶部的 YAML 属性区')
-			.addDropdown(dropdown => {
-				dropdown
-					.addOption('remove', '移除 (Remove)')
-					.addOption('keep-as-code', '保留为代码块 (Keep as Code Block)')
-					.setValue(this.plugin.settings.frontMatterHandling)
-					.onChange(async (value: 'remove' | 'keep-as-code') => {
-						this.plugin.settings.frontMatterHandling = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 子文档上传开关
-		new Setting(containerEl)
-			.setName('子文档上传')
-			.setDesc('是否处理和上传笔记中引用的其他 Markdown 文件作为子文档')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.enableSubDocumentUpload)
-					.onChange(async (value) => {
-						this.plugin.settings.enableSubDocumentUpload = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 本地图片上传开关
-		new Setting(containerEl)
-			.setName('本地图片上传')
-			.setDesc('是否上传笔记中引用的本地图片文件到飞书')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.enableLocalImageUpload)
-					.onChange(async (value) => {
-						this.plugin.settings.enableLocalImageUpload = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 本地附件上传开关
-		new Setting(containerEl)
-			.setName('本地附件上传')
-			.setDesc('是否上传笔记中引用的本地附件文件（如 PDF、Word 等）到飞书')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.enableLocalAttachmentUpload)
-					.onChange(async (value) => {
-						this.plugin.settings.enableLocalAttachmentUpload = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 分享标记开关
-		new Setting(containerEl)
-			.setName('自动添加分享标记')
-			.setDesc('分享成功后，自动在笔记的 文档属性（Front Matter） 中添加分享链接（feishu_url）与分享时间')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.enableShareMarkInFrontMatter)
-					.onChange(async (value) => {
-						this.plugin.settings.enableShareMarkInFrontMatter = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 代码块过滤（多选：每行一个语言名）
-		new Setting(containerEl)
-			.setName('代码块过滤')
-			.setDesc('每行一个代码块语言（大小写不敏感）。匹配的 fenced code 将被移除。例如：meta-bind-embed、dataviewjs')
-			.then(setting => {
-				const textarea = setting.controlEl.createEl('textarea', {
-					attr: {
-						rows: '4',
-						placeholder: 'meta-bind-embed\ndataviewjs'
-					}
-				});
-				textarea.addClass('mod-align-left');
-				textarea.value = (this.plugin.settings.codeBlockFilterLanguages || []).join('\n');
-				textarea.addEventListener('change', async () => {
-					const lines = textarea.value
-						.split(/\r?\n/)
-						.map(s => s.trim())
-						.filter(Boolean);
-					this.plugin.settings.codeBlockFilterLanguages = lines;
-					await this.plugin.saveSettings();
-				});
-			});
-
-		// 通知设置部分
-		containerEl.createEl('h3', { text: '🔔 通知设置' });
-		new Setting(containerEl)
-			.setName('取消分享状态通知')
-			.setDesc('启用后不显示分享“过程状态”通知（错误和最终成功仍提示）')
-			.addToggle(toggle => {
-				toggle
-					.setValue(!!this.plugin.settings.suppressShareNotices)
-					.onChange(async (value) => {
-						this.plugin.settings.suppressShareNotices = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		new Setting(containerEl)
-			.setName('简洁成功通知')
-			.setDesc('启用后成功仅显示一行提示；关闭时显示带“复制/打开”按钮的通知')
-			.addToggle(toggle => {
-				toggle
-					.setValue(!!this.plugin.settings.simpleSuccessNotice)
-					.onChange(async (value) => {
-						this.plugin.settings.simpleSuccessNotice = value;
-						await this.plugin.saveSettings();
-					});
-			});
-
-		// 分享权限设置部分
-		containerEl.createEl('h3', { text: '🔗 分享权限设置' });
-
-		// 启用链接分享开关
-		new Setting(containerEl)
-			.setName('启用链接分享')
-			.setDesc('是否为分享的文档设置链接分享权限，让组织内的人可以通过链接访问')
-			.addToggle(toggle => {
-				toggle
-					.setValue(this.plugin.settings.enableLinkShare)
-					.onChange(async (value) => {
-						this.plugin.settings.enableLinkShare = value;
-						await this.plugin.saveSettings();
-						this.display(); // 刷新界面以显示/隐藏权限选项
-					});
-			});
-
-		// 链接分享权限类型（仅在启用时显示）
-		if (this.plugin.settings.enableLinkShare) {
-			new Setting(containerEl)
-				.setName('链接分享权限')
-				.setDesc('设置获得链接的人的访问权限。注意：互联网访问需要企业管理员允许外部分享')
-				.addDropdown(dropdown => {
-					dropdown
-						.addOption('anyone_readable', '🌐 互联网上获得链接的任何人可阅读')
-						.addOption('anyone_editable', '🌐 互联网上获得链接的任何人可编辑')
-						.addOption('tenant_readable', '🏢 组织内获得链接的人可阅读')
-						.addOption('tenant_editable', '🏢 组织内获得链接的人可编辑')
-						.setValue(this.plugin.settings.linkSharePermission)
-						.onChange(async (value: 'anyone_readable' | 'anyone_editable' | 'tenant_readable' | 'tenant_editable') => {
-							this.plugin.settings.linkSharePermission = value;
-							await this.plugin.saveSettings();
-						});
-				});
-		}
-
         // Notion 设置部分
         containerEl.createEl('hr');
         containerEl.createEl('h2', { text: 'Notion 发布设置' });
         this.renderNotionSettings(containerEl);
+    }
 
-        // 使用说明部分
-	containerEl.createEl('h3', { text: '📖 使用说明' });
+    private renderConfluenceSettings(containerEl: HTMLElement) {
+        // Confluence 基本配置
+        new Setting(containerEl)
+            .setName('Confluence URL')
+            .setDesc('Your Confluence base URL')
+            .addText(text => text
+                .setPlaceholder('https://your-domain.atlassian.net')
+                .setValue(this.plugin.settings.confluenceUrl)
+                .onChange(async (value: string) => {
+                    this.plugin.settings.confluenceUrl = value;
+                    await this.plugin.saveSettings();
+                }));
 
-	const usageEl = containerEl.createDiv('setting-item-description');
+        new Setting(containerEl)
+            .setName('Username')
+            .setDesc('Your Confluence username/email')
+            .addText(text => text
+                .setPlaceholder('your.email@domain.com')
+                .setValue(this.plugin.settings.username)
+                .onChange(async (value: string) => {
+                    this.plugin.settings.username = value;
+                    await this.plugin.saveSettings();
+                }));
 
-		// 详细使用说明链接
-		const usageLinkDiv = usageEl.createDiv();
-		usageLinkDiv.createEl('strong', { text: '📚 详细使用说明' });
-		usageLinkDiv.createEl('br');
-		const usageLink = usageLinkDiv.createEl('a', {
-			text: '🔗 点击查看完整使用教程',
-			href: 'https://l0c34idk7v.feishu.cn/docx/Zk2VdWJPfoqmZhxPSJmcMfSbnHe'
-		});
-		usageLink.target = '_blank';
+        new Setting(containerEl)
+            .setName('Password/Token')
+            .setDesc('Your Confluence password or API token')
+            .addText((text: TextComponent) => {
+                text.setPlaceholder('Enter your password or API token')
+                    .setValue(this.plugin.settings.password)
+                    .onChange(async (value: string) => {
+                        this.plugin.settings.password = value;
+                        await this.plugin.saveSettings();
+                    });
+                text.inputEl.type = 'password';
+            });
 
-		// 快速配置指南
-		const guideDiv = usageEl.createDiv();
-		guideDiv.createEl('strong', { text: '📋 快速配置指南' });
+        new Setting(containerEl)
+            .setName('Space')
+            .setDesc('Your Confluence space key')
+            .addText(text => text
+                .setPlaceholder('SPACEKEY')
+                .setValue(this.plugin.settings.space)
+                .onChange(async (value: string) => {
+                    this.plugin.settings.space = value;
+                    await this.plugin.saveSettings();
+                }));
 
-		const stepsList = guideDiv.createEl('ol');
-
-		// 步骤1
-		const step1 = stepsList.createEl('li');
-		step1.createEl('strong', { text: '创建飞书应用：' });
-		step1.appendText('访问 ');
-		const platformLink = step1.createEl('a', {
-			text: '飞书开放平台 🔗',
-			href: 'https://open.feishu.cn/app'
-		});
-		platformLink.target = '_blank';
-		step1.appendText(' 创建"企业自建应用"，获取App ID和App Secret');
-
-		// 步骤2
-		const step2 = stepsList.createEl('li');
-		step2.createEl('strong', { text: '配置OAuth回调：' });
-		step2.appendText('在飞书应用"安全设置"中添加回调地址：');
-		step2.createEl('br');
-		step2.createEl('code', { text: 'https://md2feishu.xinqi.life/oauth-callback' });
-		step2.createEl('br');
-		step2.createEl('span', {
-			text: '💡 默认使用我们的回调服务，代码开源可自行部署',
-			cls: 'hint'
-		});
-
-		// 步骤3
-		const step3 = stepsList.createEl('li');
-		step3.createEl('strong', { text: '添加应用权限：' });
-		step3.appendText('在"权限管理"中添加以下权限：');
-		const permList = step3.createEl('ul');
-		permList.createEl('li', { text: 'user_access_token - 用户身份权限（登录用户访问）' });
-		permList.createEl('li', { text: 'contact:user.base:readonly - 获取用户基本信息' });
-		permList.createEl('li', { text: 'docx:document - 创建、编辑文档' });
-		permList.createEl('li', { text: 'drive:drive - 访问云空间文件' });
-		permList.createEl('li', { text: 'wiki:wiki - 访问和管理知识库' });
-
-		// 步骤4
-		const step4 = stepsList.createEl('li');
-		step4.createEl('strong', { text: '完成授权：' });
-		step4.appendText('在上方输入App ID和App Secret，点击"🚀 一键授权"');
-
-		// 步骤5
-		const step5 = stepsList.createEl('li');
-		step5.createEl('strong', { text: '选择文件夹：' });
-		step5.appendText('授权后可选择默认保存文件夹（可选）');
-
-		// 步骤6
-		const step6 = stepsList.createEl('li');
-		step6.createEl('strong', { text: '开始使用：' });
-		step6.appendText('右键MD文件选择"📤 分享到飞书"，或使用命令面板');
-
-		// 功能特色
-		const featuresDiv = usageEl.createDiv();
-		featuresDiv.createEl('strong', { text: '🎉 功能特色：' });
-
-		const featuresList = featuresDiv.createEl('ul');
-		featuresList.createEl('li', { text: '✅ 智能授权：自动检测token状态，失效时自动重新授权' });
-		featuresList.createEl('li', { text: '✅ 无缝分享：一键分享，自动处理授权和转换流程' });
-		featuresList.createEl('li', { text: '✅ 格式保持：完美保持Markdown格式，包括图片、表格、代码块' });
-		featuresList.createEl('li', { text: '✅ 智能处理：自动处理Obsidian双向链接、标签等语法' });
-		featuresList.createEl('li', { text: '✅ 可视化选择：支持浏览和选择目标文件夹' });
-		featuresList.createEl('li', { text: '✅ 链接分享：自动设置文档分享权限，支持组织内链接访问' });
-		featuresList.createEl('li', { text: '✅ 一键复制：分享成功后可一键复制文档链接' });
-	}
-
-private renderConfluenceSettings(containerEl: HTMLElement) {
-	const desc = containerEl.createDiv('setting-item-description');
-	desc.createEl('p', { text: '保持原有的 md2kms 发布能力，填写以下信息即可继续发布 KMS 页面。' });
-
-	new Setting(containerEl)
-		.setName('Confluence URL')
-		.setDesc('Your Confluence instance URL')
-		.addText(text => text
-			.setPlaceholder('https://your-domain.atlassian.net')
-			.setValue(this.plugin.settings.confluenceUrl)
-			.onChange(async (value: string) => {
-				this.plugin.settings.confluenceUrl = value;
-				await this.plugin.saveSettings();
-			}));
-
-	new Setting(containerEl)
-		.setName('Username')
-		.setDesc('Your Confluence username/email')
-		.addText(text => text
-			.setPlaceholder('your.email@domain.com')
-			.setValue(this.plugin.settings.username)
-			.onChange(async (value: string) => {
-				this.plugin.settings.username = value;
-				await this.plugin.saveSettings();
-			}));
-
-	new Setting(containerEl)
-		.setName('Password/Token')
-		.setDesc('Your Confluence password or API token')
-		.addText((text: TextComponent) => {
-			text.setPlaceholder('Enter your password or API token')
-				.setValue(this.plugin.settings.password)
-				.onChange(async (value: string) => {
-					this.plugin.settings.password = value;
-					await this.plugin.saveSettings();
-				});
-			text.inputEl.type = 'password';
-		});
-
-	new Setting(containerEl)
-		.setName('Space')
-		.setDesc('Your Confluence space key')
-		.addText(text => text
-			.setPlaceholder('SPACEKEY')
-			.setValue(this.plugin.settings.space)
-			.onChange(async (value: string) => {
-				this.plugin.settings.space = value;
-				await this.plugin.saveSettings();
-			}));
-
-	new Setting(containerEl)
-		.setName('md2kms Path')
-		.setDesc('Full path to your md2kms executable')
-		.addText(text => text
-			.setPlaceholder('/path/to/md2kms')
-			.setValue(this.plugin.settings.md2kmsPath)
-			.onChange(async (value: string) => {
-				this.plugin.settings.md2kmsPath = value;
-				await this.plugin.saveSettings();
-			}));
-}
+        new Setting(containerEl)
+            .setName('md2kms Path')
+            .setDesc('Full path to your md2kms executable')
+            .addText(text => text
+                .setPlaceholder('/path/to/md2kms')
+                .setValue(this.plugin.settings.md2kmsPath)
+                .onChange(async (value: string) => {
+                    this.plugin.settings.md2kmsPath = value;
+                    await this.plugin.saveSettings();
+                }));
+    }
 
     private renderNotionSettings(containerEl: HTMLElement) {
-		const desc = containerEl.createDiv('setting-item-description');
-		desc.createEl('p', { text: '集成 Notion API，支持将文档发布到 Notion 数据库或页面。' });
+        const desc = containerEl.createDiv('setting-item-description');
+        desc.createEl('p', { text: '只需配置 Notion API Token。' });
 
-		// API Token
-		new Setting(containerEl)
-			.setName('Notion API Token')
-			.setDesc('从 Notion Integrations 页面获取的内部集成令牌')
-			.addText((text: TextComponent) => {
-				text.setPlaceholder('secret_...')
-					.setValue(this.plugin.settings.notionApiToken)
-					.onChange(async (value: string) => {
-						this.plugin.settings.notionApiToken = value.trim();
-						await this.plugin.saveSettings();
-						this.updateNotionAuthStatus(containerEl);
-					});
-				text.inputEl.type = 'password';
-			});
-
-		// 工作空间信息
-		new Setting(containerEl)
-			.setName('工作空间 ID')
-			.setDesc('Notion 工作空间的 ID（可选，留空则使用默认）')
-			.addText(text => text
-				.setPlaceholder('工作空间 ID（可选）')
-				.setValue(this.plugin.settings.notionWorkspaceId || '')
-				.onChange(async (value: string) => {
-					this.plugin.settings.notionWorkspaceId = value.trim() || undefined;
-					await this.plugin.saveSettings();
-				}));
-
-		// 目标数据库
-		new Setting(containerEl)
-			.setName('目标数据库 ID')
-			.setDesc('发布文档的目标 Notion 数据库 ID（可选，留空则创建独立页面）')
-			.addText(text => text
-				.setPlaceholder('目标数据库 ID（可选）')
-				.setValue(this.plugin.settings.notionTargetDatabaseId || '')
-				.onChange(async (value: string) => {
-					this.plugin.settings.notionTargetDatabaseId = value.trim() || undefined;
-					await this.plugin.saveSettings();
-				}));
-
-		// 页面标题属性
-		new Setting(containerEl)
-			.setName('页面标题属性')
-			.setDesc('Notion 数据库中用于存储页面标题的属性名（可选）')
-			.addText(text => text
-				.setPlaceholder('Name')
-				.setValue(this.plugin.settings.notionPageTitleProperty || 'Name')
-				.onChange(async (value: string) => {
-					this.plugin.settings.notionPageTitleProperty = value.trim() || 'Name';
-					await this.plugin.saveSettings();
-				}));
-
-		// 页面标签属性
-		new Setting(containerEl)
-			.setName('页面标签属性')
-			.setDesc('Notion 数据库中用于存储页面标签的属性名（可选）')
-			.addText(text => text
-				.setPlaceholder('Tags')
-				.setValue(this.plugin.settings.notionPageTagsProperty || 'Tags')
-				.onChange(async (value: string) => {
-					this.plugin.settings.notionPageTagsProperty = value.trim() || 'Tags';
-					await this.plugin.saveSettings();
-				}));
-
-		// 发布选项标题
-		containerEl.createEl('h4', { text: '📋 发布选项' });
-
-		// 创建新页面
-		new Setting(containerEl)
-			.setName('创建新页面（如果不存在）')
-			.setDesc('当找不到同名页面时，自动创建新页面')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.notionCreateNewIfNotExists !== false)
-				.onChange(async (value: boolean) => {
-					this.plugin.settings.notionCreateNewIfNotExists = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// 更新现有页面
-		new Setting(containerEl)
-			.setName('更新现有页面')
-			.setDesc('如果找到同名页面，更新其内容而不是创建新的')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.notionUpdateExistingPages !== false)
-				.onChange(async (value: boolean) => {
-					this.plugin.settings.notionUpdateExistingPages = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// 内容处理选项标题
-		containerEl.createEl('h4', { text: '🔧 内容处理' });
-
-		// 启用子文档处理
-		new Setting(containerEl)
-			.setName('启用子文档处理')
-			.setDesc('处理 Obsidian 双链引用的子文档')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableNotionSubDocumentUpload !== false)
-				.onChange(async (value: boolean) => {
-					this.plugin.settings.enableNotionSubDocumentUpload = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// 启用图片上传
-		new Setting(containerEl)
-			.setName('启用图片上传')
-			.setDesc('将本地图片上传到 Notion')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableNotionImageUpload !== false)
-				.onChange(async (value: boolean) => {
-					this.plugin.settings.enableNotionImageUpload = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// 启用附件上传
-		new Setting(containerEl)
-			.setName('启用附件上传')
-			.setDesc('将本地附件上传到 Notion')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableNotionAttachmentUpload !== false)
-				.onChange(async (value: boolean) => {
-					this.plugin.settings.enableNotionAttachmentUpload = value;
-					await this.plugin.saveSettings();
-				}));
-
-		// 默认页面图标
-		new Setting(containerEl)
-			.setName('默认页面图标')
-			.setDesc('新创建页面的默认图标（emoji 或 URL）')
-			.addText(text => text
-				.setPlaceholder('📝 或 https://example.com/icon.png')
-				.setValue(this.plugin.settings.notionDefaultPageIcon || '')
-				.onChange(async (value: string) => {
-					this.plugin.settings.notionDefaultPageIcon = value.trim() || undefined;
-					await this.plugin.saveSettings();
-				}));
-
-		// 授权状态部分
-		containerEl.createEl('h4', { text: '🔐 授权状态' });
-		this.updateNotionAuthStatus(containerEl);
-
-		// 测试连接按钮
-		new Setting(containerEl)
-			.setName('测试 Notion 连接')
-			.setDesc('验证 API Token 是否有效并获取工作空间信息')
-			.addButton(button => button
-				.setButtonText('测试连接')
-				.setCta()
-				.onClick(async () => {
-					await this.testNotionConnection();
-				}));
-	}
+        // 仅保留 API Token 配置
+        new Setting(containerEl)
+            .setName('Notion API Token')
+            .setDesc('从 Notion Integrations 页面获取的内部集成令牌')
+            .addText((text: TextComponent) => {
+                text.setPlaceholder('secret_...')
+                    .setValue(this.plugin.settings.notionApiToken)
+                    .onChange(async (value: string) => {
+                        this.plugin.settings.notionApiToken = value.trim();
+                        await this.plugin.saveSettings();
+                    });
+                text.inputEl.type = 'password';
+            });
+    }
 
     private updateNotionAuthStatus(containerEl: HTMLElement) {
 		// 查找现有的授权状态元素

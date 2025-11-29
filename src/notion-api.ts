@@ -40,6 +40,26 @@ export class NotionApiService {
         this.apiToken = settings.notionApiToken;
     }
 
+    // 随机封面与图标池（本地静态列表，避免外部依赖）
+    private readonly emojiPool: string[] = [
+        '📝','📘','📙','📗','📕','📒','📚','🧠','💡','🛠️','🔬','🧪','📈','📊','🗺️','🌟','🚀','✨','🔖','📎'
+    ];
+    // 固定封面（用户指定）
+    private readonly fixedCoverUrl: string = 'https://www.notion.so/images/page-cover/gradients_8.png';
+
+    private pickRandom<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)]; }
+    private pickRandomIcon(): any { return this.parseIcon(this.pickRandom(this.emojiPool)); }
+    private buildFixedCover(): any { return { type: 'external', external: { url: this.fixedCoverUrl } }; }
+
+    // 可靠地设置页面图标与封面（部分工作区对创建时的icon/cover忽略，此方法确保落地）
+    private async ensurePageIconCover(pageId: string, icon: any, cover: any): Promise<void> {
+        try {
+            await this.makeRequest(`/pages/${pageId}`, 'PATCH', { icon, cover });
+        } catch (e) {
+            Debug.warn(`[Notion] ensurePageIconCover failed for ${pageId}: ${String((e as Error)?.message || e)}`);
+        }
+    }
+
     /**
      * 将 Notion 页面 URL 提取并规范为带短横线的 pageId
      */
@@ -131,17 +151,36 @@ export class NotionApiService {
 	/**
 	 * 根据标题查找现有页面
 	 */
-    async findPageByTitle(title: string, opts?: { databaseId?: string; parentPageId?: string }): Promise<NotionPage | null> {
+    async findPageByTitle(
+        title: string,
+        opts?: { databaseId?: string; parentPageId?: string; pageTitleProperty?: string }
+    ): Promise<NotionPage | null> {
         try {
             if (opts?.databaseId) {
+                const titleProp = opts.pageTitleProperty || 'Name';
                 const resp = await this.makeRequest<{ results: NotionPage[] }>(`/databases/${opts.databaseId}/query`, 'POST', {
-                    filter: { property: 'Name', title: { equals: title } },
+                    filter: { property: titleProp, title: { equals: title } },
                     page_size: 10,
                 });
                 const pages = (resp as any).results || [];
                 return pages[0] || null;
             }
 
+            // 当指定了父页面时，更稳妥的方式：读取父页面的子块，查找 child_page 块标题完全相等的子页面
+            if (opts?.parentPageId) {
+                try {
+                    const children = await this.getPageBlocks(opts.parentPageId);
+                    const match = (children as any[]).find((b: any) => b?.type === 'child_page' && (b.child_page?.title || '') === title);
+                    if (match?.id) {
+                        const page = await this.makeRequest<NotionPage>(`/pages/${match.id}`, 'GET');
+                        return page;
+                    }
+                } catch (e) {
+                    Debug.warn(`[Notion] child_page scan failed, fallback to search: ${String((e as Error)?.message || e)}`);
+                }
+            }
+
+            // 回退：使用搜索接口并在本地过滤父页面
             const results = await this.searchPages(title);
             const filtered = (results || []).filter((p: any) => {
                 const parent = p.parent;
@@ -158,17 +197,17 @@ export class NotionApiService {
 	/**
 	 * 创建新页面
 	 */
-	async createPage(
-		title: string,
-		content: NotionBlock[],
-		options: {
-			databaseId?: string;
-			parentPageId?: string;
-			icon?: string;
-			cover?: string;
-			properties?: Record<string, any>;
-		} = {}
-	): Promise<NotionPage> {
+    async createPage(
+        title: string,
+        content: NotionBlock[],
+        options: {
+            databaseId?: string;
+            parentPageId?: string;
+            icon?: string;
+            cover?: string;
+            properties?: Record<string, any>;
+        } = {}
+    ): Promise<NotionPage> {
 		const parent: any = {};
 
 		if (options.databaseId) {
@@ -189,37 +228,38 @@ export class NotionApiService {
 		};
 
 		// 添加标题属性
-		if (options.databaseId) {
-			pageData.properties.Name = {
-				title: [{ text: { content: title } }]
-			};
+        if (options.databaseId) {
+            pageData.properties.Name = {
+                title: [{ text: { content: title } }]
+            };
         } else {
-            // 对于非数据库页面，标题在 children 中设置
-            (content as any).unshift({
-                object: 'block',
-                type: 'heading_1',
-                heading_1: {
-                    rich_text: [{ type: 'text', text: { content: title }, plain_text: title, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' } }],
-                    color: 'default',
-                    is_toggleable: false
-                }
-            } as any);
+            // 非数据库页面的标题应通过 properties.title 设置，确保页面标题与文档标题一致
+            pageData.properties.title = {
+                title: [{ text: { content: title } }]
+            };
         }
 
-		// 添加图标和封面
-		if (options.icon) {
-			pageData.icon = this.parseIcon(options.icon);
-		}
+        // 添加图标和封面（若未显式指定，则随机挑选；创建后再PATCH一次确保生效）
+        let chosenIcon: any = null;
+        let chosenCover: any = null;
+        if (options.icon) {
+            pageData.icon = this.parseIcon(options.icon);
+        } else {
+            try { chosenIcon = this.pickRandomIcon(); pageData.icon = chosenIcon; } catch {}
+        }
 
-		if (options.cover) {
-			pageData.cover = {
-				type: 'external',
-				external: { url: options.cover }
-			};
-		}
+        if (options.cover) {
+            pageData.cover = { type: 'external', external: { url: options.cover } };
+        } else {
+            try { chosenCover = this.buildFixedCover(); pageData.cover = chosenCover; } catch {}
+        }
 
-		const response = await this.makeRequest<NotionPage>('/pages', 'POST', pageData);
-		return response;
+        const response = await this.makeRequest<NotionPage>('/pages', 'POST', pageData);
+        // 二次确认封面与图标
+        if (response?.id && (chosenIcon || chosenCover)) {
+            await this.ensurePageIconCover(response.id, chosenIcon, chosenCover);
+        }
+        return response;
 	}
 
 	/**
@@ -941,7 +981,7 @@ export class NotionApiService {
             let existingPage: NotionPage | null = null;
             if (context.updateExistingPages) {
                 Debug.log(`[Notion] Searching for existing page with title: "${title}"`);
-                existingPage = await this.findPageByTitle(title, { databaseId: context.targetDatabaseId, parentPageId });
+                existingPage = await this.findPageByTitle(title, { databaseId: context.targetDatabaseId, parentPageId, pageTitleProperty: context.pageTitleProperty });
                 Debug.log(`[Notion] Existing page found:`, existingPage ? existingPage.id : 'none');
             }
 
@@ -959,8 +999,17 @@ export class NotionApiService {
             if (existingPage) {
                 Debug.log(`[Notion] Found existing page with same title: ${existingPage.id}, updating content...`);
 
-                // 更新现有页面：删除旧内容，添加新内容
-                await this.updatePage(existingPage.id, prepared, { replaceContent: true });
+                // 同步页面标题与文档标题
+                const props: Record<string, any> = {};
+                if (context.targetDatabaseId) {
+                    const nameProp = context.pageTitleProperty || 'Name';
+                    props[nameProp] = { title: [{ text: { content: title } }] };
+                } else {
+                    props.title = { title: [{ text: { content: title } }] };
+                }
+
+                // 更新现有页面：先更新标题属性，再替换内容
+                await this.updatePage(existingPage.id, prepared, { replaceContent: true, properties: props });
                 Debug.log(`[Notion] Successfully updated existing page: ${existingPage.url}`);
                 return { success: true, pageId: existingPage.id, url: existingPage.url, title, updatedExisting: true };
             }
@@ -980,11 +1029,20 @@ export class NotionApiService {
             const pageData: any = { parent };
             if (parent.type === 'database_id') {
                 pageData.properties = { [context.pageTitleProperty || 'Name']: { title: [{ text: { content: title } }] } };
+            } else {
+                // 非数据库页面：使用 properties.title 作为页面标题
+                pageData.properties = { title: { title: [{ text: { content: title } }] } };
             }
-            if ((context as any).defaultPageIcon) pageData.icon = this.parseIcon((context as any).defaultPageIcon);
+            // 为新页面随机设置图标与封面（创建后再补打一遍，确保生效）
+            let chosenIcon: any = null;
+            let chosenCover: any = null;
+            try { chosenIcon = this.pickRandomIcon(); pageData.icon = chosenIcon; } catch {}
+            try { chosenCover = this.buildFixedCover(); pageData.cover = chosenCover; } catch {}
 
             const created = await this.makeRequest<NotionPage>('/pages', 'POST', pageData);
             Debug.log(`[Notion] New page created: ${created.id}`);
+            // 二次确认封面与图标
+            if (chosenIcon || chosenCover) await this.ensurePageIconCover(created.id, chosenIcon, chosenCover);
             await this.appendBlocksWithTables(created.id, prepared, tablePlans);
             Debug.log(`[Notion] Successfully published to new page: ${created.url}`);
             return { success: true, pageId: created.id, url: created.url, title, updatedExisting: false };

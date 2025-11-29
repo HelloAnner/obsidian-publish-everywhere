@@ -314,21 +314,24 @@ export default class PublishEverywherePlugin extends Plugin {
             await this.ensureFileSaved(file);
             const rawContent = await this.app.vault.read(file);
 
-            // frontmatter: 优先使用 notion_url 作为“目标页面”进行覆盖更新
+            // frontmatter 解析：
+            // - notion      始终表示“父页面位置”（不要动父页面内容）
+            // - notion_url  表示“已创建的子页面链接”（若存在则直接更新该子页面）
             const fm = this.app.metadataCache.getFileCache(file)?.frontmatter;
-            let targetPageId: string | undefined = undefined;
-            let parentPageId: string | undefined = undefined;
+            let childPageIdToUpdate: string | undefined;
+            let parentPageId: string | undefined;
             if (fm?.notion_url) {
                 const maybe = this.notionApi.parseNotionPageIdFromUrl(String(fm.notion_url));
-                if (maybe) targetPageId = maybe;
+                if (maybe) childPageIdToUpdate = maybe;
             }
-            // 兼容：如果只有 notion 字段，既可能是父页面，也可能直接是目标页面
-            if (!targetPageId && fm?.notion) {
+            if (fm?.notion) {
                 const maybe = this.notionApi.parseNotionPageIdFromUrl(String(fm.notion));
-                if (maybe) {
-                    // 优先尝试把它当作“目标页面”覆盖更新；若失败再作为父页面
-                    targetPageId = maybe;
-                }
+                if (maybe) parentPageId = maybe;
+            }
+            // 保护：若误将父页面链接写入了 notion_url，避免覆盖父页面内容
+            if (childPageIdToUpdate && parentPageId && childPageIdToUpdate === parentPageId) {
+                this.log('[Publish to Notion] notion_url 等于 notion（父页面），将忽略 notion_url 以避免覆盖父页面内容', 'warn');
+                childPageIdToUpdate = undefined;
             }
 
             // 构造源文件所在目录（用于解析相对路径的本地资源）
@@ -336,48 +339,10 @@ export default class PublishEverywherePlugin extends Plugin {
             const absoluteFilePath = path.join(vaultPath, file.path);
             const sourceDir = path.dirname(absoluteFilePath);
 
-            // 处理 Markdown 内容（飞书用）与原始 Markdown（Notion 用）分离：
-            // - 飞书继续走 MarkdownProcessor 以保留其格式优化与占位符处理；
-            // - Notion 使用原始 Markdown，让 src/notion-markdown.ts 负责解析/恢复表格并分批写入。
-            const processor = new MarkdownProcessor(this.app);
-            const processedResult = processor.processCompleteWithFiles(
-                rawContent,
-                3, // maxDepth
-                'remove', // frontMatterHandling: remove front matter
-                true, // enableSubDocumentUpload
-                true, // enableLocalImageUpload
-                true, // enableLocalAttachmentUpload
-                'filename', // titleSource
-                [] // codeBlockFilterLanguages
-            );
-
-            // 若 frontmatter 指定了明确的目标页面，则直接覆盖更新该页面
+            // 标题决定更新/创建：优先使用父页面 + 标题去匹配子页面；没有父页面才回退到 notion_url
             let result;
-            if (targetPageId) {
-                // 先尝试直接覆盖写入该页面；如果失败（比如不是页面ID），再降级为以其作为父页面创建/更新
-                // Notion 使用原始 Markdown（rawContent），避免飞书预处理影响表格解析
-                result = await this.notionApi.publishToExistingPage(targetPageId, rawContent, {
-                    apiToken: this.settings.notionApiToken as any,
-                    targetDatabaseId: this.settings.notionTargetDatabaseId,
-                    workspaceId: this.settings.notionWorkspaceId,
-                    pageTitleProperty: this.settings.notionPageTitleProperty,
-                    pageTagsProperty: this.settings.notionPageTagsProperty,
-                    pageStatusProperty: this.settings.notionPageStatusProperty,
-                    createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
-                    updateExistingPages: this.settings.notionUpdateExistingPages !== false,
-                    defaultPageIcon: this.settings.notionDefaultPageIcon,
-                    sourceDir,
-                } as any);
-
-                // 如果直接覆盖失败，再把 notion 当作父页面
-                if (!result?.success && fm?.notion && !parentPageId) {
-                    parentPageId = this.notionApi.parseNotionPageIdFromUrl(String(fm.notion)) || undefined;
-                }
-            }
-
-            if (!result || (result && result.success === false && !parentPageId)) {
-                // 发布到 Notion（内部完成 Markdown→Blocks 与文件上传）
-                // Notion 使用原始 Markdown（rawContent）
+            if (parentPageId) {
+                // 在父页面下查找是否已有与当前标题相同的子页面；有则更新，无则创建
                 result = await this.notionApi.publishDocument(title, rawContent, {
                     apiToken: this.settings.notionApiToken as any,
                     targetDatabaseId: this.settings.notionTargetDatabaseId,
@@ -389,6 +354,34 @@ export default class PublishEverywherePlugin extends Plugin {
                     updateExistingPages: this.settings.notionUpdateExistingPages !== false,
                     defaultPageIcon: this.settings.notionDefaultPageIcon,
                     parentPageId,
+                    sourceDir,
+                });
+            } else if (childPageIdToUpdate) {
+                // 无父页面信息时，才使用 notion_url 指向的页面进行直接更新
+                result = await this.notionApi.publishToExistingPage(childPageIdToUpdate, rawContent, {
+                    apiToken: this.settings.notionApiToken as any,
+                    targetDatabaseId: this.settings.notionTargetDatabaseId,
+                    workspaceId: this.settings.notionWorkspaceId,
+                    pageTitleProperty: this.settings.notionPageTitleProperty,
+                    pageTagsProperty: this.settings.notionPageTagsProperty,
+                    pageStatusProperty: this.settings.notionPageStatusProperty,
+                    createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
+                    updateExistingPages: this.settings.notionUpdateExistingPages !== false,
+                    defaultPageIcon: this.settings.notionDefaultPageIcon,
+                    sourceDir,
+                } as any);
+            } else {
+                // 既无父页面也无 notion_url，则在工作区或目标数据库创建一个新页面
+                result = await this.notionApi.publishDocument(title, rawContent, {
+                    apiToken: this.settings.notionApiToken as any,
+                    targetDatabaseId: this.settings.notionTargetDatabaseId,
+                    workspaceId: this.settings.notionWorkspaceId,
+                    pageTitleProperty: this.settings.notionPageTitleProperty,
+                    pageTagsProperty: this.settings.notionPageTagsProperty,
+                    pageStatusProperty: this.settings.notionPageStatusProperty,
+                    createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
+                    updateExistingPages: this.settings.notionUpdateExistingPages !== false,
+                    defaultPageIcon: this.settings.notionDefaultPageIcon,
                     sourceDir,
                 });
             }
