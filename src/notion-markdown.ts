@@ -13,7 +13,8 @@ import { toString } from 'mdast-util-to-string';
 
 export interface ConvertOptions {
     // 将本地资源路径转成 Notion 文件上传 id 的解析器（由调用方注入）
-    resolveLocalAsset?: (src: string) => Promise<{ kind: 'image' | 'file'; uploadId: string; caption?: string } | null>;
+    // 可携带额外元信息（例如图片宽度）以便在上传前进行处理（压缩/缩放）
+    resolveLocalAsset?: (src: string, meta?: { width?: number }) => Promise<{ kind: 'image' | 'file'; uploadId: string; caption?: string } | null>;
 }
 
 // 将纯文本与内联样式转为 Notion RichText
@@ -93,6 +94,19 @@ function textToRichText(nodes: any[]): NotionRichText[] {
 function baseBlock(): any { return {}; }
 
 export async function convertMarkdownToBlocks(markdown: string, options: ConvertOptions = {}): Promise<NotionBlock[]> {
+    // 支持 Obsidian 图片语法：![[image.png|500]] 或 [image.png|500]
+    const normalizeObsidianImages = (md: string): string => {
+        if (!md) return md;
+        // 1) ![[attachments/1.png|500]] → ![attachments/1.png|500](attachments/1.png)
+        md = md.replace(/!\[\[([^\]\n]+?)(?:\|(\d{2,4}))?\]\]/g,
+            (_m, name, w) => `![${name}${w ? '|' + w : ''}](${name})`);
+        // 2) [attachments/1.png|500]（非标准，但兼容）→ ![attachments/1.png|500](attachments/1.png)
+        md = md.replace(/(?<!\!)\[([^\]\n]+?\.(?:png|jpe?g|gif|bmp|webp|svg|avif))(?:\|(\d{2,4}))?\]/gi,
+            (_m, name, w) => `![${name}${w ? '|' + w : ''}](${name})`);
+        return md;
+    };
+
+    markdown = normalizeObsidianImages(markdown);
     const tree = unified().use(remarkParse).use(remarkGfm).parse(markdown);
     const blocks: NotionBlock[] = [] as any;
 
@@ -248,13 +262,24 @@ export async function convertMarkdownToBlocks(markdown: string, options: Convert
             await flushList();
             const url: string = node.url || '';
             const captionText = node.alt || '';
+            // 从 alt 解析宽度（形如 name|500），默认 500，限制范围 [300, 1200]
+            const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+            const widthFromAlt = (() => {
+                const m = /\|(\d{2,4})\s*$/.exec(captionText || '');
+                if (!m) return undefined;
+                const w = parseInt(m[1], 10);
+                if (!Number.isFinite(w)) return undefined;
+                return clamp(w, 300, 1200);
+            })();
+            const preferredWidth = widthFromAlt ?? 500;
+            const captionStripped = (captionText || '').replace(/\|(\d{2,4})\s*$/, '').trim();
             const b: any = baseBlock();
             b.type = 'image';
-            b.image = { type: 'external', external: { url }, caption: captionText ? [{ type: 'text', text: { content: captionText }, plain_text: captionText, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' } }] : [] };
+            b.image = { type: 'external', external: { url }, caption: captionStripped ? [{ type: 'text', text: { content: captionStripped }, plain_text: captionStripped, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' } }] : [] };
 
             // 本地资源（非 http/https）
             if (!/^https?:\/\//i.test(url) && options.resolveLocalAsset) {
-                const resolved = await options.resolveLocalAsset(url);
+                const resolved = await options.resolveLocalAsset(url, { width: preferredWidth });
                 if (resolved && resolved.kind === 'image') {
                     b.image = { type: 'file_upload', file_upload: { id: resolved.uploadId }, caption: b.image.caption };
                 }

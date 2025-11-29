@@ -383,7 +383,94 @@ export class NotionApiService {
 
         const mdNoFm = stripFrontMatter(markdown);
 
-        const resolver = async (src: string) => {
+        const clamp = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
+
+        const resizeImageIfNeeded = async (filePath: string, targetWidth: number): Promise<{ buffer: Buffer; contentType: string }> => {
+            try {
+                const buf = await fs.readFile(filePath);
+                const ext = path.extname(filePath).toLowerCase();
+                const mimeType = (mime.lookup(ext) || 'application/octet-stream').toString();
+                if (!/^image\//i.test(mimeType)) return { buffer: buf as any, contentType: mimeType };
+
+                // 仅对超过目标宽度的图片进行缩放
+                // 使用浏览器 Canvas 进行等比缩放（Obsidian 运行在 Electron 渲染进程，可用 DOM）
+                const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`;
+                const widthTarget = clamp(targetWidth || 500, 300, 1200);
+
+                const resized: Buffer = await new Promise((resolve, reject) => {
+                    try {
+                        const img = new Image();
+                        (img as any).onload = () => {
+                            try {
+                                const w = (img as any).width || (img as HTMLImageElement).naturalWidth || 0;
+                                const h = (img as any).height || (img as HTMLImageElement).naturalHeight || 0;
+                                if (!w || !h) { resolve(buf as any); return; }
+                                if (w <= widthTarget) { resolve(buf as any); return; }
+                                const scale = widthTarget / w;
+                                const outW = Math.round(w * scale);
+                                const outH = Math.round(h * scale);
+                                const canvas = document.createElement('canvas');
+                                canvas.width = outW; canvas.height = outH;
+                                const ctx = canvas.getContext('2d');
+                                if (!ctx) { resolve(buf as any); return; }
+                                ctx.drawImage(img as any, 0, 0, outW, outH);
+                                const outMime = /jpeg|jpg/i.test(mimeType) ? 'image/jpeg' : (/png|webp|bmp|gif|avif|svg/i.test(mimeType) ? mimeType : 'image/png');
+                                const outUrl = canvas.toDataURL(outMime, 0.92);
+                                const b64 = outUrl.split(',')[1] || '';
+                                resolve(Buffer.from(b64, 'base64'));
+                            } catch (err) { resolve(buf as any); }
+                        };
+                        (img as any).onerror = () => resolve(buf as any);
+                        (img as any).src = dataUrl;
+                    } catch (err) {
+                        resolve(buf as any);
+                    }
+                });
+                return { buffer: resized as any, contentType: mimeType };
+            } catch {
+                const ext = path.extname(filePath).toLowerCase();
+                const mimeType = (mime.lookup(ext) || 'application/octet-stream').toString();
+                const original = await fs.readFile(filePath);
+                return { buffer: original as any, contentType: mimeType };
+            }
+        };
+
+        const uploadBufferAsFile = async (filename: string, contentType: string, content: Buffer): Promise<string> => {
+            // 1) 创建 file_upload 对象
+            const createResp = await this.makeRequest<NotionFileUploadResponse>(`/file_uploads`, 'POST', {
+                filename,
+                content_type: contentType,
+            });
+            const uploadId = (createResp as any).id;
+
+            // 2) 发送内容（multipart/form-data）
+            const boundary = `----obn_${Date.now().toString(16)}`;
+            const pre = Buffer.from(
+                `--${boundary}\r\n` +
+                `Content-Disposition: form-data; name="file"; filename="${filename}"\r\n` +
+                `Content-Type: ${contentType}\r\n\r\n`, 'utf8'
+            );
+            const post = Buffer.from(`\r\n--${boundary}--\r\n`, 'utf8');
+            const bodyBuf = Buffer.concat([pre, content, post]);
+            const sendUrl = `${this.baseUrl}/file_uploads/${uploadId}/send`;
+            const sendResp = await requestUrl({
+                url: sendUrl,
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${this.apiToken}`,
+                    'Notion-Version': '2022-06-28',
+                    'Content-Type': `multipart/form-data; boundary=${boundary}`
+                },
+                body: bodyBuf,
+                throw: false
+            });
+            if (sendResp.status < 200 || sendResp.status >= 300) {
+                throw new Error(`文件上传失败: ${sendResp.status}`);
+            }
+            return uploadId;
+        };
+
+        const resolver = async (src: string, meta?: { width?: number }) => {
             let abs: string | null = null;
             if (src.startsWith('/')) {
                 abs = src; // 认为是绝对路径（Obsidian 中不常见）
@@ -392,9 +479,19 @@ export class NotionApiService {
             }
             if (!abs) return null;
             try { await fs.stat(abs); } catch { return null; }
-            const uploadId = await this.uploadLocalFile(abs);
             const ext = path.extname(abs).toLowerCase();
             const isImage = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.svg', '.webp', '.avif'].includes(ext);
+            let uploadId: string;
+            if (isImage) {
+                const tgt = clamp(Number(meta?.width || 500) || 500, 300, 1200);
+                const resized = await resizeImageIfNeeded(abs, tgt);
+                // 保持原始文件名，附上 -w{tgt} 后缀，避免文件名重复不友好
+                const base = path.basename(abs);
+                const name = base.replace(/(\.[^.]+)?$/, (_m, g1) => `-w${tgt}${g1 || ''}`);
+                uploadId = await uploadBufferAsFile(name, resized.contentType, resized.buffer as any);
+            } else {
+                uploadId = await this.uploadLocalFile(abs);
+            }
             return { kind: (isImage ? 'image' : 'file'), uploadId };
         };
         const blocks = await convertMarkdownToBlocks(mdNoFm, { resolveLocalAsset: resolver as any });
