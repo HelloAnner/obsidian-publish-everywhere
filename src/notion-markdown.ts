@@ -54,6 +54,49 @@ function textToRichText(nodes: any[]): NotionRichText[] {
         }
     };
 
+    // 将 CSS/HEX/RGB 颜色映射为 Notion 支持的背景色
+    const cssColorToNotionBackground = (css: string | undefined): string => {
+        if (!css) return 'yellow_background';
+        css = css.trim().toLowerCase();
+        const named: Record<string, string> = {
+            yellow: 'yellow_background', orange: 'orange_background', red: 'red_background',
+            green: 'green_background', blue: 'blue_background', purple: 'purple_background',
+            pink: 'pink_background', gray: 'gray_background', grey: 'gray_background', brown: 'brown_background'
+        };
+        if (css in named) return named[css];
+
+        let r = 255, g = 230, b = 100; // default yellow-ish
+        const hex = css.match(/^#([0-9a-f]{6}|[0-9a-f]{8})$/i);
+        if (hex) {
+            const v = hex[1];
+            r = parseInt(v.slice(0, 2), 16);
+            g = parseInt(v.slice(2, 4), 16);
+            b = parseInt(v.slice(4, 6), 16);
+        } else if (/^rgb\s*\(/.test(css)) {
+            const m = css.match(/rgba?\s*\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/);
+            if (m) { r = +m[1]; g = +m[2]; b = +m[3]; }
+        }
+        // RGB -> HSL（只需色相即可）
+        r /= 255; g /= 255; b /= 255;
+        const mx = Math.max(r, g, b), mn = Math.min(r, g, b);
+        const d = mx - mn;
+        let h = 0;
+        if (d === 0) h = 0;
+        else if (mx === r) h = ((g - b) / d) % 6;
+        else if (mx === g) h = (b - r) / d + 2;
+        else h = (r - g) / d + 4;
+        h = Math.round(h * 60); if (h < 0) h += 360;
+        // 依据色相粗略映射到 Notion 颜色
+        if (h < 15 || h >= 345) return 'red_background';
+        if (h < 45) return 'orange_background';
+        if (h < 70) return 'yellow_background';
+        if (h < 160) return 'green_background';
+        if (h < 210) return 'blue_background';
+        if (h < 270) return 'purple_background';
+        if (h < 330) return 'pink_background';
+        return 'gray_background';
+    };
+
     const walk = (n: any, ann?: Partial<NotionRichText['annotations']>, linkHref?: string) => {
         switch (n.type) {
             case 'text':
@@ -61,9 +104,28 @@ function textToRichText(nodes: any[]): NotionRichText[] {
                 break;
             case 'html': {
                 const v = String(n.value || '');
-                // 简单处理 <mark>..</mark>
-                const replaced = v.replace(/<mark\b[^>]*>([\s\S]*?)<\/mark>/gi, '==$1==');
-                pushText(replaced, ann, linkHref);
+                // 解析 <mark style="background: ..."> 内容，映射颜色；其余内容作为普通文本
+                const re = /<mark\b([^>]*)>([\s\S]*?)<\/mark>/gi;
+                let last = 0; let m: RegExpExecArray | null;
+                while ((m = re.exec(v))) {
+                    const pre = v.slice(last, m.index);
+                    if (pre) pushText(pre, ann, linkHref);
+                    last = re.lastIndex;
+                    const attrs = m[1] || '';
+                    const inner = m[2] || '';
+                    // 提取 background/background-color
+                    let bg: string | undefined;
+                    const styleMatch = attrs.match(/style\s*=\s*"([^"]*)"/i) || attrs.match(/style\s*=\s*'([^']*)'/i);
+                    if (styleMatch) {
+                        const style = styleMatch[1] || '';
+                        const bgMatch = style.match(/background(?:-color)?\s*:\s*([^;]+)\s*;?/i);
+                        if (bgMatch) bg = bgMatch[1].trim();
+                    }
+                    const notionColor = cssColorToNotionBackground(bg);
+                    pushRun(inner, { ...ann, color: notionColor }, linkHref);
+                }
+                const tail = v.slice(last);
+                if (tail) pushText(tail, ann, linkHref);
                 break;
             }
             case 'emphasis':

@@ -965,6 +965,25 @@ export class NotionApiService {
         return null;
     }
 
+    /**
+     * 确保数据库存在中文日期属性：“创建时间”“上次更新时间”（类型：date）。
+     * 若不存在则为数据库新增属性；存在则不修改。
+     */
+    private async ensureDatabaseDateProps(databaseId: string): Promise<void> {
+        try {
+            const db = await this.getDatabase(databaseId);
+            const props = (db as any)?.properties || {};
+            const need: Record<string, any> = {};
+            if (!props['创建时间']) need['创建时间'] = { date: {} };
+            if (!props['上次更新时间']) need['上次更新时间'] = { date: {} };
+            const keys = Object.keys(need);
+            if (keys.length === 0) return;
+            await this.makeRequest(`/databases/${databaseId}`, 'PATCH', { properties: need });
+        } catch (e) {
+            Debug.warn(`[Notion] ensureDatabaseDateProps failed: ${String((e as Error)?.message || e)}`);
+        }
+    }
+
 	/**
 	 * 解析图标
 	 */
@@ -1133,6 +1152,7 @@ export class NotionApiService {
                 if (context.targetDatabaseId) {
                     const nameProp = context.pageTitleProperty || 'Name';
                     props[nameProp] = { title: [{ text: { content: title } }] };
+                    // 按需仅同步标题；“创建时间/上次更新时间”由外部系统自动维护，更新时不改动
                 } else {
                     props.title = { title: [{ text: { content: title } }] };
                 }
@@ -1164,7 +1184,14 @@ export class NotionApiService {
                     if (dbKey) titlePropKey = dbKey;
                 }
                 if (!titlePropKey) titlePropKey = 'Name';
-                pageData.properties = { [titlePropKey]: { title: [{ text: { content: title } }] } };
+                // 确保中文日期属性存在
+                await this.ensureDatabaseDateProps(context.targetDatabaseId!);
+                const nowIso = new Date().toISOString();
+                pageData.properties = {
+                    [titlePropKey]: { title: [{ text: { content: title } }] },
+                    ['创建时间']: { date: { start: nowIso } },
+                    ['上次更新时间']: { date: { start: nowIso } },
+                } as any;
             } else {
                 // 非数据库页面：使用 properties.title 作为页面标题
                 pageData.properties = { title: { title: [{ text: { content: title } }] } };
@@ -1179,7 +1206,19 @@ export class NotionApiService {
             Debug.log(`[Notion] New page created: ${created.id}`);
             // 二次确认封面与图标
             if (chosenIcon || chosenCover) await this.ensurePageIconCover(created.id, chosenIcon, chosenCover);
-            await this.appendBlocksWithTables(created.id, prepared, tablePlans);
+            // 非数据库页面：在正文顶部插入“创建时间 / 上次更新时间”信息（中文固定名称）
+            if (parent.type !== 'database_id') {
+                const nowText = new Date().toISOString().replace('T', ' ').slice(0, 16);
+                const metaBlocks: any[] = [
+                    { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `创建时间：${nowText}` }, plain_text: `创建时间：${nowText}`, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' } }], color: 'default' } },
+                    { object: 'block', type: 'paragraph', paragraph: { rich_text: [{ type: 'text', text: { content: `上次更新时间：${nowText}` }, plain_text: `上次更新时间：${nowText}`, annotations: { bold: false, italic: false, strikethrough: false, underline: false, code: false, color: 'default' } }], color: 'default' } },
+                ];
+                const combined = [...metaBlocks, ...prepared];
+                await this.appendBlocksWithTables(created.id, combined as any[], tablePlans);
+                Debug.log(`[Notion] Added metadata paragraphs to non-database page.`);
+            } else {
+                await this.appendBlocksWithTables(created.id, prepared, tablePlans);
+            }
             Debug.log(`[Notion] Successfully published to new page: ${created.url}`);
             return { success: true, pageId: created.id, url: created.url, title, updatedExisting: false };
         } catch (error) {
