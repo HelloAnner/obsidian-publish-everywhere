@@ -165,26 +165,7 @@ export default class PublishEverywherePlugin extends Plugin {
 			]
 		});
 
-		this.addCommand({
-			id: 'publish-to-all-platforms-with-notion',
-			name: '🚀 发布到所有平台（含Notion）',
-			checkCallback: (checking: boolean) => {
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					if (!checking) {
-                        this.publishToAllPlatforms();
-					}
-					return true;
-				}
-				return false;
-			},
-			hotkeys: [
-				{
-					modifiers: ['Mod', 'Ctrl', 'Shift'],
-					key: 'p'
-				}
-			]
-		});
+		// 保留一个一键发布命令（已移除重复的“含Notion”命令）
 	}
 
 	/**
@@ -1114,6 +1095,7 @@ export default class PublishEverywherePlugin extends Plugin {
 		const platforms: string[] = [];
 		if (frontmatter.kms) platforms.push('KMS');
 		if (frontmatter.feishu) platforms.push('飞书');
+		if (frontmatter.notion || frontmatter.notion_url) platforms.push('Notion');
 
 		if (platforms.length === 0) {
 			new Notice('❌ 当前笔记没有配置任何发布平台（kms 或 feishu）');
@@ -1164,6 +1146,24 @@ export default class PublishEverywherePlugin extends Plugin {
 				});
 				this.log(`飞书 发布失败: ${error.message}`, 'error');
 				new Notice(`❌ 飞书 发布失败: ${error.message}`, 4000);
+			}
+		}
+
+		// 发布到 Notion（如果配置了）
+		if (frontmatter.notion || frontmatter.notion_url) {
+			try {
+				this.log('Publishing to Notion...');
+				await this.publishCurrentNoteToNotion(view);
+				results.push({ platform: 'Notion', success: true });
+				new Notice('✅ Notion 发布成功', 2000);
+			} catch (error) {
+				results.push({ platform: 'Notion', success: false, error: (error as Error).message });
+				this.log(`Notion 发布失败: ${(error as Error).message}`, 'error');
+				new Notice(`❌ Notion 发布失败: ${(error as Error).message}`, 4000);
+			}
+
+			if (platforms.length > 1) {
+				await new Promise(resolve => setTimeout(resolve, 1000));
 			}
 		}
 
