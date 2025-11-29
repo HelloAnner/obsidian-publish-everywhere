@@ -339,23 +339,40 @@ export default class PublishEverywherePlugin extends Plugin {
             const absoluteFilePath = path.join(vaultPath, file.path);
             const sourceDir = path.dirname(absoluteFilePath);
 
-            // 标题决定更新/创建：优先使用父页面 + 标题去匹配子页面；没有父页面才回退到 notion_url
+            // 标题决定更新/创建（普通父页面）；如果父链接是数据库（表格），则按标题查找，存在则更新，不存在则新建
             let result;
             if (parentPageId) {
-                // 在父页面下查找是否已有与当前标题相同的子页面；有则更新，无则创建
-                result = await this.notionApi.publishDocument(title, rawContent, {
-                    apiToken: this.settings.notionApiToken as any,
-                    targetDatabaseId: this.settings.notionTargetDatabaseId,
-                    workspaceId: this.settings.notionWorkspaceId,
-                    pageTitleProperty: this.settings.notionPageTitleProperty,
-                    pageTagsProperty: this.settings.notionPageTagsProperty,
-                    pageStatusProperty: this.settings.notionPageStatusProperty,
-                    createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
-                    updateExistingPages: this.settings.notionUpdateExistingPages !== false,
-                    defaultPageIcon: this.settings.notionDefaultPageIcon,
-                    parentPageId,
-                    sourceDir,
-                });
+                const isDb = await this.notionApi.isDatabaseId(parentPageId);
+                if (isDb) {
+                    // 数据库模式：对比标题（数据库标题列），匹配则更新，否则新建
+                    result = await this.notionApi.publishDocument(title, rawContent, {
+                        apiToken: this.settings.notionApiToken as any,
+                        targetDatabaseId: parentPageId,
+                        workspaceId: this.settings.notionWorkspaceId,
+                        pageTitleProperty: this.settings.notionPageTitleProperty,
+                        pageTagsProperty: this.settings.notionPageTagsProperty,
+                        pageStatusProperty: this.settings.notionPageStatusProperty,
+                        createNewIfNotExists: true,
+                        updateExistingPages: true,
+                        defaultPageIcon: this.settings.notionDefaultPageIcon,
+                        sourceDir,
+                    } as any);
+                } else {
+                    // 普通父页面：按标题匹配同名子页面；存在则更新，不存在则创建
+                    result = await this.notionApi.publishDocument(title, rawContent, {
+                        apiToken: this.settings.notionApiToken as any,
+                        targetDatabaseId: this.settings.notionTargetDatabaseId,
+                        workspaceId: this.settings.notionWorkspaceId,
+                        pageTitleProperty: this.settings.notionPageTitleProperty,
+                        pageTagsProperty: this.settings.notionPageTagsProperty,
+                        pageStatusProperty: this.settings.notionPageStatusProperty,
+                        createNewIfNotExists: this.settings.notionCreateNewIfNotExists !== false,
+                        updateExistingPages: this.settings.notionUpdateExistingPages !== false,
+                        defaultPageIcon: this.settings.notionDefaultPageIcon,
+                        parentPageId,
+                        sourceDir,
+                    });
+                }
             } else if (childPageIdToUpdate) {
                 // 无父页面信息时，才使用 notion_url 指向的页面进行直接更新
                 result = await this.notionApi.publishToExistingPage(childPageIdToUpdate, rawContent, {

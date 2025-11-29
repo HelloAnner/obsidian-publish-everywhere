@@ -157,9 +157,18 @@ export class NotionApiService {
     ): Promise<NotionPage | null> {
         try {
             if (opts?.databaseId) {
-                const titleProp = opts.pageTitleProperty || 'Name';
+                // 自动解析数据库标题属性键名；若未传入则从数据库元数据中获取（无则回退 Name，仍无则取第一个属性键）
+                let titleProp = opts.pageTitleProperty;
+                if (!titleProp) {
+                    const db = await this.getDatabase(opts.databaseId);
+                    const props = (db as any)?.properties || {};
+                    titleProp = Object.keys(props).find(k => props[k]?.type === 'title')
+                        || 'Name'
+                        || Object.keys(props)[0];
+                }
+                const filter: any = { property: titleProp, title: { equals: title } };
                 const resp = await this.makeRequest<{ results: NotionPage[] }>(`/databases/${opts.databaseId}/query`, 'POST', {
-                    filter: { property: titleProp, title: { equals: title } },
+                    filter,
                     page_size: 10,
                 });
                 const pages = (resp as any).results || [];
@@ -816,7 +825,7 @@ export class NotionApiService {
 	/**
 	 * 获取数据库列表
 	 */
-	async getDatabases(): Promise<NotionDatabase[]> {
+    async getDatabases(): Promise<NotionDatabase[]> {
         const searchResponse = await this.makeRequest<any>('/search', 'POST', {
             filter: {
                 property: 'object',
@@ -833,8 +842,31 @@ export class NotionApiService {
             }
         }
 
-		return databases;
-	}
+        return databases;
+    }
+
+    /** 检查给定ID是否为数据库ID */
+    async isDatabaseId(id: string): Promise<boolean> {
+        if (!id) return false;
+        try {
+            await this.getDatabase(id);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    /** 获取数据库的“标题”属性键名（type === 'title'） */
+    private async getDatabaseTitlePropKey(databaseId: string): Promise<string | null> {
+        try {
+            const db = await this.getDatabase(databaseId);
+            const props = (db as any)?.properties || {};
+            for (const key of Object.keys(props)) {
+                if (props[key]?.type === 'title') return key;
+            }
+        } catch {}
+        return null;
+    }
 
 	/**
 	 * 解析图标
@@ -1028,7 +1060,14 @@ export class NotionApiService {
 
             const pageData: any = { parent };
             if (parent.type === 'database_id') {
-                pageData.properties = { [context.pageTitleProperty || 'Name']: { title: [{ text: { content: title } }] } };
+                // 自动解析数据库的标题属性键名，若未配置
+                let titlePropKey: string | undefined = context.pageTitleProperty;
+                if (!titlePropKey) {
+                    const dbKey = await this.getDatabaseTitlePropKey(context.targetDatabaseId!);
+                    if (dbKey) titlePropKey = dbKey;
+                }
+                if (!titlePropKey) titlePropKey = 'Name';
+                pageData.properties = { [titlePropKey]: { title: [{ text: { content: title } }] } };
             } else {
                 // 非数据库页面：使用 properties.title 作为页面标题
                 pageData.properties = { title: { title: [{ text: { content: title } }] } };
