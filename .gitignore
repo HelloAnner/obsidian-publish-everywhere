@@ -7,6 +7,10 @@
 
 # npm
 node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
 
 # Don't include the compiled main.js file in the repo.
 # They should be uploaded to GitHub releases instead.
@@ -20,3 +24,86 @@ data.json
 
 # Exclude macOS Finder (System Explorer) View States
 .DS_Store
+
+# OS generated files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+._*
+
+# Editor files and directories
+*.swp
+*.swo
+*~
+.~lock.*
+.sublime-*
+*.komodoproject
+*.kdev4
+*.pid
+.metadata
+.history
+
+# Build outputs
+dist/
+build/
+out/
+*.exe
+*.dll
+*.so
+*.dylib
+*.class
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+*.rar
+
+# Dependency directories (common ones)
+jspm_packages/
+bower_components/
+
+# Logs
+logs/
+*.log
+
+# Runtime data
+pids/
+*.pid
+*.seed
+*.pid.lock
+
+# Coverage directory used by tools like istanbul
+coverage/
+.nyc_output/
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variables file
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next
