@@ -1,5 +1,4 @@
 import { Plugin, Notice, TFile, Menu, Editor, MarkdownView, requestUrl } from 'obsidian';
-import { exec } from 'child_process';
 import * as path from 'path';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE } from './src/constants';
@@ -9,18 +8,14 @@ import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
 import { Debug } from './src/debug';
 import { CallbackPublishQueue, PublishTask } from './src/publish-queue';
+import { ConfluenceClient } from './src/confluence/confluence-client';
+import { ConfluencePublisher } from './src/confluence/confluence-publisher';
 
 interface ConfluencePublisherSettings {
 	confluenceUrl: string;
 	username: string;
 	password: string;
 	space: string;
-	md2kmsPath: string;
-}
-
-interface ProcessResult {
-	stdout: string;
-	stderr: string;
 }
 
 type PublishEverywhereSettings = FeishuSettings & ConfluencePublisherSettings & NotionSettings;
@@ -29,8 +24,7 @@ const DEFAULT_CONFLUENCE_SETTINGS: ConfluencePublisherSettings = {
 	confluenceUrl: '',
 	username: '',
 	password: '',
-	space: '',
-	md2kmsPath: ''
+	space: ''
 };
 
 const DEFAULT_SETTINGS: PublishEverywhereSettings = {
@@ -549,7 +543,7 @@ export default class PublishEverywherePlugin extends Plugin {
 			return;
 		}
 
-		if (!this.settings.confluenceUrl || !this.settings.username || !this.settings.password || !this.settings.space || !this.settings.md2kmsPath) {
+		if (!this.settings.confluenceUrl || !this.settings.username || !this.settings.password || !this.settings.space) {
 			this.log('[Publish to Confluence] Missing configuration', 'error');
 			new Notice('请先完成 KMS 配置');
 			return;
@@ -571,62 +565,37 @@ export default class PublishEverywherePlugin extends Plugin {
 		const parentId = pageIdMatch[1];
 
 		const vaultPath = (this.app.vault.adapter as any).basePath;
-		const absoluteFilePath = path.join(vaultPath, file.path);
 
 		try {
 			const title = file.basename;
 			new Notice('⏳ 页面发布中...');
 
-			const escapeSpaces = (str: string) => str.replace(/ /g, '\\ ');
-			const command = `${escapeSpaces(this.settings.md2kmsPath)} --url ${escapeSpaces(this.settings.confluenceUrl)} --username ${escapeSpaces(this.settings.username)} --password ${escapeSpaces(this.settings.password)} --space ${escapeSpaces(this.settings.space)} --title ${escapeSpaces(title)} --parent ${parentId} ${escapeSpaces(absoluteFilePath)}`;
-			this.log(`[Publish to Confluence] Executing command: ${command.replace(this.settings.password, '********')}`);
-
-			let processOutput = '';
-			let processError = '';
-
-			const processPromise = new Promise<ProcessResult>((resolve, reject) => {
-				const childProcess = exec(command, {
-					maxBuffer: 1024 * 1024 * 10
-				});
-
-				childProcess.stdout?.on('data', (data) => {
-					processOutput += data;
-				});
-
-				childProcess.stderr?.on('data', (data) => {
-					processError += data;
-				});
-
-				childProcess.on('error', (error) => {
-					this.log(`[Publish to Confluence] Process error: ${(error as Error).message}`, 'error');
-					reject(error);
-				});
-
-				childProcess.on('exit', (code) => {
-					this.log(`[Publish to Confluence] Process exited with code ${code}`);
-					if (code === 0) {
-						resolve({ stdout: processOutput, stderr: processError });
-					} else {
-						reject(new Error(processError || `Process exited with code ${code}`));
-					}
-				});
+			const client = new ConfluenceClient({
+				baseUrl: this.settings.confluenceUrl,
+				spaceKey: this.settings.space,
+				username: this.settings.username,
+				password: this.settings.password
+			});
+			const publisher = new ConfluencePublisher({
+				app: this.app,
+				client,
+				vaultBasePath: vaultPath
 			});
 
-			await processPromise;
+			const publishResult = await publisher.publishMarkdownFile({
+				file,
+				title,
+				parentPageId: parentId
+			});
 
-			let resolvedKmsUrl: string | null = null;
+			const resolvedKmsUrl: string | null = publishResult.pageUrl || null;
 			try {
-				resolvedKmsUrl = await this.resolveConfluencePageUrl(title, parentId);
-				if (resolvedKmsUrl) {
-					this.log('[Publish to Confluence] Resolved page URL successfully');
-					const rawContent = await this.app.vault.read(file);
-					const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(rawContent, resolvedKmsUrl);
-					if (rawContent !== updatedContent) {
-						await this.app.vault.modify(file, updatedContent);
-						this.log('[Publish to Confluence] kms_url frontmatter updated');
-					}
-				} else {
-					this.log('[Publish to Confluence] Unable to resolve page URL for kms_url update', 'warn');
+				this.log('[Publish to Confluence] Page published successfully');
+				const rawContent = await this.app.vault.read(file);
+				const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(rawContent, publishResult.pageUrl);
+				if (rawContent !== updatedContent) {
+					await this.app.vault.modify(file, updatedContent);
+					this.log('[Publish to Confluence] kms_url frontmatter updated');
 				}
 			} catch (error) {
 				this.log(`[Publish to Confluence] Failed to update kms_url: ${(error as Error).message}`, 'warn');
@@ -636,9 +605,9 @@ export default class PublishEverywherePlugin extends Plugin {
 			notice.noticeEl.createEl('button', {
 				text: '查看页面',
 				cls: 'mod-cta'
-			}).onclick = () => {
-				window.open(resolvedKmsUrl || frontmatter.kms, '_blank');
-			};
+				}).onclick = () => {
+					window.open(resolvedKmsUrl || frontmatter.kms, '_blank');
+				};
 		} catch (error) {
 			const message = (error as Error).message || '发布失败';
 			new Notice(message);

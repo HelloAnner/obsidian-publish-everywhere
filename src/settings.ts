@@ -197,17 +197,6 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
                     this.plugin.settings.space = value;
                     await this.plugin.saveSettings();
                 }));
-
-        new Setting(containerEl)
-            .setName('md2kms Path')
-            .setDesc('Full path to your md2kms executable')
-            .addText(text => text
-                .setPlaceholder('/path/to/md2kms')
-                .setValue(this.plugin.settings.md2kmsPath)
-                .onChange(async (value: string) => {
-                    this.plugin.settings.md2kmsPath = value;
-                    await this.plugin.saveSettings();
-                }));
     }
 
     private renderNotionSettings(containerEl: HTMLElement) {

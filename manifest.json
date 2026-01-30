@@ -1,11 +1,10 @@
 {
-	"id": "obsidian-publish-kms",
+	"id": "obsidian-publish-everywhere",
 	"name": "Publish To EveryWhere",
 	"version": "1.0.0",
 	"minAppVersion": "0.15.0",
-	"description": "Publish Obsidian notes to KMS using md2kms tool",
+	"description": "Publish Obsidian notes to KMS (Confluence) directly from Obsidian",
 	"author": "Anner Wang",
 	"authorUrl": "https://github.com/annerwang",
 	"isDesktopOnly": true
 }
-

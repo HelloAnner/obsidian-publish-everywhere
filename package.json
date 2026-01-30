@@ -1,7 +1,7 @@
 {
-	"name": "obsidian-publish-kms",
+	"name": "obsidian-publish-everywhere",
 	"version": "1.0.0",
-	"description": "Publish Obsidian notes to KMS using md2kms tool",
+	"description": "Publish Obsidian notes to KMS (Confluence) directly from Obsidian",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",
@@ -11,8 +11,7 @@
 	"keywords": [
 		"obsidian",
 		"kms",
-		"publish",
-		"md2kms"
+		"publish"
 	],
 	"author": "Anner Wang",
 	"license": "MIT",
@@ -32,8 +31,11 @@
 		"image-size": "^2.0.2",
 		"mdast-util-to-string": "^4.0.0",
 		"mime-types": "^2.1.35",
+		"rehype-raw": "^7.0.0",
+		"rehype-stringify": "^10.0.0",
 		"remark-gfm": "^4.0.0",
 		"remark-parse": "^11.0.0",
+		"remark-rehype": "^11.1.1",
 		"unified": "^11.0.5",
 		"unist-util-visit": "^5.0.0"
 	}
