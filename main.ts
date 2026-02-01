@@ -2,8 +2,8 @@ import { Plugin, Notice, TFile, MarkdownView, requestUrl } from 'obsidian';
 import * as path from 'path';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE } from './src/constants';
-import { FeishuApiService } from './src/feishu-api';
-import { NotionApiService } from './src/notion-api';
+import { FeishuApiService } from './src/feishu/feishu-api';
+import { NotionApiService } from './src/notion/notion-api';
 import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
 import { Debug } from './src/debug';
@@ -313,6 +313,7 @@ export default class PublishEverywherePlugin extends Plugin {
                     updateExistingPages: this.settings.notionUpdateExistingPages !== false,
                     defaultPageIcon: this.settings.notionDefaultPageIcon,
                     sourceDir,
+                    title,
                 } as any);
             } else {
                 // 既无父页面也无 notion_url，则在工作区或目标数据库创建一个新页面
@@ -330,21 +331,38 @@ export default class PublishEverywherePlugin extends Plugin {
                 });
             }
 
-			if (result.success) {
-				new Notice('✅ 发布到 Notion 成功！');
+		if (result.success) {
+			// 检查是否为更新模式
+			const isUpdateMode = this.checkNotionUpdateMode(fm || null);
+			const operation = isUpdateMode.shouldUpdate ? '更新' : '发布';
+			new Notice(`✅ 成功${operation}到 Notion！`);
 
-				// 更新 front matter 中的 notion_url
-				await this.updateNotionUrlInFrontMatter(file, result.url!, result.pageId!);
+			// 更新 front matter 中的 notion_url
+			await this.updateNotionUrlInFrontMatter(file, result.url!, result.pageId!);
 
-				// 复制链接到剪贴板
-				if (this.settings.simpleSuccessNotice) {
-					await navigator.clipboard.writeText(result.url!);
-					new Notice(`🔗 已复制 Notion 链接到剪贴板`);
+			// 如果是更新模式，更新时间戳
+			if (isUpdateMode.shouldUpdate) {
+				try {
+					this.log('Updating Notion share timestamp in front matter');
+					const updatedContent = this.updateNotionShareTimestamp(rawContent);
+					if (rawContent !== updatedContent) {
+						await this.app.vault.modify(file, updatedContent);
+						this.log('Notion share timestamp updated successfully');
+					}
+				} catch (error) {
+					this.log(`Failed to update Notion share timestamp: ${error.message}`, 'warn');
 				}
-			} else {
-				this.log(`[Publish to Notion] Failed: ${result.error}`, 'error');
-				new Notice(`❌ 发布到 Notion 失败: ${result.error}`);
 			}
+
+			// 复制链接到剪贴板
+			if (this.settings.simpleSuccessNotice) {
+				await navigator.clipboard.writeText(result.url!);
+				new Notice(`🔗 已复制 Notion 链接到剪贴板`);
+			}
+		} else {
+			this.log(`[Publish to Notion] Failed: ${result.error}`, 'error');
+			new Notice(`❌ 发布到 Notion 失败: ${result.error}`);
+		}
 		} catch (error) {
 			this.handleError(error as Error, 'Notion发布');
 		}
@@ -357,6 +375,82 @@ export default class PublishEverywherePlugin extends Plugin {
         await this.app.fileManager.processFrontMatter(file, (fm) => {
             (fm as any).notion_url = notionUrl;
         });
+    }
+
+    /**
+     * 更新 Notion 分享时间戳
+     * 基于文本操作，保留原始YAML结构
+     * @param content 原始文件内容
+     * @returns 更新后的文件内容
+     */
+    private updateNotionShareTimestamp(content: string): string {
+        // 获取东8区时间
+        const now = new Date();
+        const chinaTime = new Date(now.getTime() + (8 * 60 * 60 * 1000)); // UTC+8
+        const yyyy = chinaTime.getUTCFullYear();
+        const mm = String(chinaTime.getUTCMonth() + 1).padStart(2, '0');
+        const dd = String(chinaTime.getUTCDate()).padStart(2, '0');
+        const HH = String(chinaTime.getUTCHours()).padStart(2, '0');
+        const MM = String(chinaTime.getUTCMinutes()).padStart(2, '0');
+        const currentTime = `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
+
+        // 检查是否有Front Matter
+        if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
+            return content; // 没有Front Matter，直接返回
+        }
+
+        const lines = content.split('\n');
+        let endIndex = -1;
+
+        // 找到Front Matter的结束位置
+        for (let i = 1; i < lines.length; i++) {
+            if (lines[i].trim() === '---') {
+                endIndex = i;
+                break;
+            }
+        }
+
+        if (endIndex === -1) {
+            return content; // 没有找到结束标记
+        }
+
+        // 查找并更新notion_shared_at字段
+        for (let i = 1; i < endIndex; i++) {
+            const line = lines[i];
+            const trimmedLine = line.trim();
+
+            if (trimmedLine.startsWith('notion_shared_at:')) {
+                lines[i] = `notion_shared_at: "${currentTime}"`;
+                break;
+            }
+        }
+
+        return lines.join('\n');
+    }
+
+    /**
+     * 检查是否为 Notion 更新模式
+     * @param frontMatter Front Matter数据
+     * @returns 更新模式检查结果
+     */
+    private checkNotionUpdateMode(frontMatter: Record<string, unknown> | null): { shouldUpdate: boolean; notionUrl?: string } {
+        if (!frontMatter) {
+            return { shouldUpdate: false };
+        }
+
+        // 检查是否存在notion_url
+        const rawUrl = frontMatter.notion_url;
+        const notionUrl = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+
+        if (notionUrl) {
+            this.log(`Found Notion URL marker: ${notionUrl}`);
+            return {
+                shouldUpdate: true,
+                notionUrl: notionUrl
+            };
+        }
+
+        return { shouldUpdate: false };
     }
 
 	/**
@@ -1196,7 +1290,11 @@ export default class PublishEverywherePlugin extends Plugin {
                         await this.publishCurrentNoteToConfluence(task.view);
 					}
 					break;
-				case 'all':
+			case 'notion':
+				if (task.view) {
+					await this.publishCurrentNoteToNotion(task.view);
+				}
+				break;				case 'all':
 					if (task.view) {
 						await this.publishToAllPlatformsInternal(task.view);
 					}

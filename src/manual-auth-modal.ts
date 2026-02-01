@@ -1,5 +1,5 @@
 import { App, Modal, Setting, Notice } from 'obsidian';
-import { FeishuApiService } from './feishu-api';
+import { FeishuApiService } from './feishu/feishu-api';
 
 export class ManualAuthModal extends Modal {
 	private feishuApi: FeishuApiService;

@@ -21,10 +21,10 @@ import {
 	TargetType,
 	ParentLocation,
 	FrontMatterData
-} from './types';
-import { FEISHU_CONFIG, FEISHU_ERROR_MESSAGES } from './constants';
-import { Debug } from './debug';
-import { MarkdownProcessor } from './markdown-processor';
+} from '../types';
+import { FEISHU_CONFIG, FEISHU_ERROR_MESSAGES } from '../constants';
+import { Debug } from '../debug';
+import { MarkdownProcessor } from '../markdown-processor';
 
 /**
  * 智能频率控制器

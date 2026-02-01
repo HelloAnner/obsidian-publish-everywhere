@@ -1,5 +1,5 @@
 import { App, Modal, Notice } from 'obsidian';
-import { FeishuApiService } from './feishu-api';
+import { FeishuApiService } from './feishu/feishu-api';
 
 export interface FeishuFolder {
 	folder_token?: string; // 兼容旧版本

@@ -4,8 +4,8 @@
  * 覆盖：标题/段落/加粗/斜体/链接/列表/引用/代码块/表格/分割线/图片/附件。
  */
 
-import { NotionBlock, NotionRichText } from './types';
-import { Debug } from './debug';
+import { NotionBlock, NotionRichText } from '../types';
+import { Debug } from '../debug';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';

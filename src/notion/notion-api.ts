@@ -14,12 +14,12 @@ import {
     NotionFileUploadResponse,
     NotionPublishResult,
     NotionProcessContext,
-} from './types';
+} from '../types';
 import { convertMarkdownToBlocks } from './notion-markdown';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as mime from 'mime-types';
-import { Debug } from './debug';
+import { Debug } from '../debug';
 
 // Notion API 约束与重试策略（遵循 AGENTS.md 中的网络退避规定）
 const MAX_CHILDREN_PER_REQ = 100;           // Notion 每次追加 children 的上限
@@ -58,6 +58,34 @@ export class NotionApiService {
         } catch (e) {
             Debug.warn(`[Notion] ensurePageIconCover failed for ${pageId}: ${String((e as Error)?.message || e)}`);
         }
+    }
+
+    /**
+     * 从 Notion 页面对象中提取页面标题
+     */
+    private extractPageTitle(page: any): string {
+        if (!page || !page.properties) return '';
+        
+        const props = page.properties;
+        // 尝试常见的标题属性名
+        const titleKeys = ['title', 'Name', '名称'];
+        
+        for (const key of titleKeys) {
+            const prop = props[key];
+            if (prop?.type === 'title' && prop.title?.length > 0) {
+                return prop.title.map((t: any) => t.plain_text || t.text?.content || '').join('');
+            }
+        }
+        
+        // 如果没找到，遍历所有属性查找 title 类型
+        for (const key of Object.keys(props)) {
+            const prop = props[key];
+            if (prop?.type === 'title' && prop.title?.length > 0) {
+                return prop.title.map((t: any) => t.plain_text || t.text?.content || '').join('');
+            }
+        }
+        
+        return '';
     }
 
     /**
@@ -189,9 +217,13 @@ export class NotionApiService {
                 }
             }
 
-            // 回退：使用搜索接口并在本地过滤父页面
+            // 回退：使用搜索接口并在本地过滤父页面和标题
             const results = await this.searchPages(title);
             const filtered = (results || []).filter((p: any) => {
+                // 验证标题精确匹配
+                const pageTitle = this.extractPageTitle(p);
+                if (pageTitle !== title) return false;
+                // 验证父页面匹配
                 const parent = p.parent;
                 if (opts?.parentPageId) return parent?.type === 'page_id' && parent.page_id === opts.parentPageId;
                 return true;
@@ -306,7 +338,7 @@ export class NotionApiService {
     async publishToExistingPage(
         pageId: string,
         markdown: string,
-        context: NotionProcessContext & { sourceDir?: string }
+        context: NotionProcessContext & { sourceDir?: string; title?: string }
     ): Promise<NotionPublishResult> {
         Debug.log(`[Notion] publishToExistingPage: pageId=${pageId}`);
         try {
@@ -322,13 +354,36 @@ export class NotionApiService {
             const { prepared, tablePlans } = this.prepareBlocksForAppend(blocks as any[]);
             Debug.log(`[Notion] Prepared ${prepared.length} blocks (existing page), tables=${tablePlans.size}`);
 
+            // 准备属性更新（包括标题）
+            const properties: Record<string, any> = {};
+            if (context.title) {
+                // 根据父类型决定标题属性名
+                try {
+                    const page = await this.makeRequest<NotionPage>(`/pages/${pageId}`, 'GET');
+                    const parentType = page.parent?.type;
+                    if (parentType === 'database_id') {
+                        // 数据库页面：使用配置的标题属性或默认 Name
+                        const dbKey = await this.getDatabaseTitlePropKey(page.parent.database_id!);
+                        const titleProp = context.pageTitleProperty || dbKey || 'Name';
+                        properties[titleProp] = { title: [{ text: { content: context.title } }] };
+                    } else {
+                        // 普通页面：使用 properties.title
+                        properties.title = { title: [{ text: { content: context.title } }] };
+                    }
+                } catch (e) {
+                    Debug.warn(`[Notion] Failed to detect parent type for title update: ${String((e as Error)?.message || e)}`);
+                    // 回退：尝试使用默认 title 属性
+                    properties.title = { title: [{ text: { content: context.title } }] };
+                }
+            }
+
             // 覆盖写入：传入原始 blocks，让 updatePage 自行 prepare，避免只剩表头
-            await this.updatePage(pageId, blocks as any[], { replaceContent: true });
+            await this.updatePage(pageId, blocks as any[], { replaceContent: true, properties });
 
             // 回读页面获取URL
             const page = await this.makeRequest<NotionPage>(`/pages/${pageId}`, 'GET');
             Debug.log(`[Notion] Updated existing page ok: ${page?.url}`);
-            return { success: true, pageId, url: (page as any)?.url, title: undefined, updatedExisting: true };
+            return { success: true, pageId, url: (page as any)?.url, title: context.title, updatedExisting: true };
         } catch (error) {
             Debug.error('[Notion] publishToExistingPage failed:', error);
             return { success: false, error: (error as Error)?.message || 'Unknown error' };
@@ -1152,13 +1207,14 @@ export class NotionApiService {
                 if (context.targetDatabaseId) {
                     const nameProp = context.pageTitleProperty || 'Name';
                     props[nameProp] = { title: [{ text: { content: title } }] };
-                    // 按需仅同步标题；“创建时间/上次更新时间”由外部系统自动维护，更新时不改动
+                    // 按需仅同步标题；"创建时间/上次更新时间"由外部系统自动维护，更新时不改动
                 } else {
                     props.title = { title: [{ text: { content: title } }] };
                 }
 
-                // 更新现有页面：先更新标题属性，再替换内容
-                await this.updatePage(existingPage.id, prepared, { replaceContent: true, properties: props });
+                // 更新现有页面：传入原始 blocks，updatePage 内部会自行处理
+                // 注意：不要传入 prepared，因为 updatePage 内部会调用 prepareBlocksForAppend
+                await this.updatePage(existingPage.id, blocks as any[], { replaceContent: true, properties: props });
                 Debug.log(`[Notion] Successfully updated existing page: ${existingPage.url}`);
                 return { success: true, pageId: existingPage.id, url: existingPage.url, title, updatedExisting: true };
             }

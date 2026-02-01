@@ -255,7 +255,22 @@ function addTOCMacro(content: string): string {
 		`<ac:parameter ac:name="maxLevel">3</ac:parameter>` +
 		`<ac:parameter ac:name="minLevel">1</ac:parameter>` +
 		`</ac:structured-macro>`;
-	return `${toc}\n${content}`;
+
+	// 通过 Confluence 的 section/column 布局宏把目录放到右侧
+	return (
+		`<ac:structured-macro ac:name="section">` +
+		`<ac:rich-text-body>` +
+		`<ac:structured-macro ac:name="column">` +
+		`<ac:parameter ac:name="width">75%</ac:parameter>` +
+		`<ac:rich-text-body>${content}</ac:rich-text-body>` +
+		`</ac:structured-macro>` +
+		`<ac:structured-macro ac:name="column">` +
+		`<ac:parameter ac:name="width">25%</ac:parameter>` +
+		`<ac:rich-text-body>${toc}</ac:rich-text-body>` +
+		`</ac:structured-macro>` +
+		`</ac:rich-text-body>` +
+		`</ac:structured-macro>`
+	);
 }
 
 function escapeCDATA(content: string): string {
@@ -368,4 +383,3 @@ function toHex(n: number): string {
 	const v = Math.max(0, Math.min(255, Math.round(n)));
 	return v.toString(16).padStart(2, '0').toUpperCase();
 }
-
