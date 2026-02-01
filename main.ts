@@ -1,4 +1,4 @@
-import { Plugin, Notice, TFile, Menu, Editor, MarkdownView, requestUrl } from 'obsidian';
+import { Plugin, Notice, TFile, MarkdownView, requestUrl } from 'obsidian';
 import * as path from 'path';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE } from './src/constants';
@@ -63,8 +63,7 @@ export default class PublishEverywherePlugin extends Plugin {
 
 		// 注册命令和菜单
 		this.registerCommands();
-		this.registerMenus();
-	}
+		}
 
 	onunload(): void {
 		// 清理资源
@@ -160,53 +159,6 @@ export default class PublishEverywherePlugin extends Plugin {
 		});
 
 		// 保留一个一键发布命令（已移除重复的“含Notion”命令）
-	}
-
-	/**
-	 * 注册右键菜单
-	 */
-	private registerMenus(): void {
-		// 添加文件右键菜单
-		this.registerEvent(
-			this.app.workspace.on('file-menu', (menu: Menu, file: TFile) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					menu.addItem((item) => {
-						item
-							.setTitle('📤 分享到飞书')
-							.setIcon('share')
-							.onClick(() => {
-								this.shareFile(file);
-							});
-					});
-
-					// 添加 Notion 分享选项
-					menu.addItem((item) => {
-						item
-							.setTitle('📝 分享到Notion')
-							.setIcon('notion')
-                        .onClick(() => {
-                            const mv = this.app.workspace.getActiveViewOfType(MarkdownView);
-                            if (mv) this.publishCurrentNoteToNotion(mv);
-                            else new Notice('No file is currently open');
-                        });
-					});
-				}
-			})
-		);
-
-		// 添加编辑器右键菜单
-		this.registerEvent(
-			this.app.workspace.on('editor-menu', (menu: Menu, editor: Editor, view: MarkdownView) => {
-				menu.addItem((item) => {
-					item
-						.setTitle('📤 分享到飞书')
-						.setIcon('share')
-						.onClick(() => {
-							this.shareCurrentNote();
-						});
-				});
-			})
-		);
 	}
 
 	async loadSettings(): Promise<void> {
