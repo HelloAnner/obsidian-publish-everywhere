@@ -249,7 +249,12 @@ function postProcessTables(content: string): string {
 }
 
 function addTOCMacro(content: string): string {
-	const toc = `<p><ac:structured-macro ac:name="easy-heading-free" ac:schema-version="1"/></p>`;
+	const toc =
+		`<p>` +
+		`<ac:structured-macro ac:name="easy-heading-free" ac:schema-version="1">` +
+		`<ac:parameter ac:name="navigationExpandOption">expand-all-by-default</ac:parameter>` +
+		`</ac:structured-macro>` +
+		`</p>`;
 	return `${toc}${content}`;
 }
 
