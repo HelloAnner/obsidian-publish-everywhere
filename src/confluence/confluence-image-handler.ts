@@ -78,10 +78,9 @@ export class ConfluenceImageHandler {
 
 	private buildImageMacro(url: string, width?: number): string {
 		const escaped = escapeXmlAttr(url);
-		if (width && width > 0) {
-			return `<ac:image ac:width="${width}"><ri:url ri:value="${escaped}"/></ac:image>`;
-		}
-		return `<ac:image><ri:url ri:value="${escaped}"/></ac:image>`;
+		// 优先使用笔记指定的大小，否则默认 500
+		const finalWidth = width && width > 0 ? width : 500;
+		return `<ac:image ac:width="${finalWidth}"><ri:url ri:value="${escaped}"/></ac:image>`;
 	}
 
 	private processImagePath(imagePath: string): { fullPath: string; size: number } {

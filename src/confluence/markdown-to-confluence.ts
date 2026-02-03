@@ -244,33 +244,13 @@ function postProcessTables(content: string): string {
 	let out = content.replace(/<table>\s*<tr>/g, '<table><tbody><tr>');
 	out = out.replace(/<\/tr>\s*<\/table>/g, '</tr></tbody></table>');
 	out = out.replace(/<br(?:\s*\/)?>/g, '<br/>');
+	out = out.replace(/<hr(?![^>]*\/>)([^>]*)>/g, '<hr$1/>');
 	return out;
 }
 
 function addTOCMacro(content: string): string {
-	const toc =
-		`<ac:structured-macro ac:name="toc">` +
-		`<ac:parameter ac:name="printable">true</ac:parameter>` +
-		`<ac:parameter ac:name="style">disc</ac:parameter>` +
-		`<ac:parameter ac:name="maxLevel">3</ac:parameter>` +
-		`<ac:parameter ac:name="minLevel">1</ac:parameter>` +
-		`</ac:structured-macro>`;
-
-	// 通过 Confluence 的 section/column 布局宏把目录放到右侧
-	return (
-		`<ac:structured-macro ac:name="section">` +
-		`<ac:rich-text-body>` +
-		`<ac:structured-macro ac:name="column">` +
-		`<ac:parameter ac:name="width">75%</ac:parameter>` +
-		`<ac:rich-text-body>${content}</ac:rich-text-body>` +
-		`</ac:structured-macro>` +
-		`<ac:structured-macro ac:name="column">` +
-		`<ac:parameter ac:name="width">25%</ac:parameter>` +
-		`<ac:rich-text-body>${toc}</ac:rich-text-body>` +
-		`</ac:structured-macro>` +
-		`</ac:rich-text-body>` +
-		`</ac:structured-macro>`
-	);
+	const toc = `<p><ac:structured-macro ac:name="easy-heading-free" ac:schema-version="1"/></p>`;
+	return `${toc}${content}`;
 }
 
 function escapeCDATA(content: string): string {
