@@ -10,6 +10,7 @@ import { Debug } from './src/debug';
 import { CallbackPublishQueue, PublishTask } from './src/publish-queue';
 import { ConfluenceClient } from './src/confluence/confluence-client';
 import { ConfluencePublisher } from './src/confluence/confluence-publisher';
+import { replaceBareKmsLinks, replaceWikiLinksWithKmsUrl } from './src/confluence/kms-link-utils';
 
 interface ConfluencePublisherSettings {
 	confluenceUrl: string;
@@ -582,82 +583,113 @@ export default class PublishEverywherePlugin extends Plugin {
 	}
 
 	private async publishCurrentNoteToConfluence(view: MarkdownView): Promise<void> {
-		const file = view.file;
-		if (!file) {
-			this.log('[Publish to Confluence] No active file', 'error');
-			new Notice('No file is currently open');
+		const context = this.resolveConfluencePublishContext(view);
+		if (!context) {
 			return;
 		}
-
-		if (!this.settings.confluenceUrl || !this.settings.username || !this.settings.password || !this.settings.space) {
-			this.log('[Publish to Confluence] Missing configuration', 'error');
-			new Notice('请先完成 KMS 配置');
-			return;
-		}
-
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		if (!frontmatter?.kms) {
-			this.log('[Publish to Confluence] No KMS URL in frontmatter', 'error');
-			new Notice('当前笔记缺少 KMS Front Matter 信息');
-			return;
-		}
-
-		const pageIdMatch = frontmatter.kms.match(/pageId=(\d+)/);
-		if (!pageIdMatch) {
-			this.log('[Publish to Confluence] Could not extract pageId', 'error');
-			new Notice('无法从 KMS 链接中提取 pageId');
-			return;
-		}
-		const parentId = pageIdMatch[1];
-
-		const vaultPath = (this.app.vault.adapter as any).basePath;
-
 		try {
-			const title = file.basename;
-			new Notice('⏳ 页面发布中...');
-
-			const client = new ConfluenceClient({
-				baseUrl: this.settings.confluenceUrl,
-				spaceKey: this.settings.space,
-				username: this.settings.username,
-				password: this.settings.password
-			});
-			const publisher = new ConfluencePublisher({
-				app: this.app,
-				client,
-				vaultBasePath: vaultPath
-			});
-
-			const publishResult = await publisher.publishMarkdownFile({
-				file,
-				title,
-				parentPageId: parentId
-			});
-
-			const resolvedKmsUrl: string | null = publishResult.pageUrl || null;
-			try {
-				this.log('[Publish to Confluence] Page published successfully');
-				const rawContent = await this.app.vault.read(file);
-				const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(rawContent, publishResult.pageUrl);
-				if (rawContent !== updatedContent) {
-					await this.app.vault.modify(file, updatedContent);
-					this.log('[Publish to Confluence] kms_url frontmatter updated');
-				}
-			} catch (error) {
-				this.log(`[Publish to Confluence] Failed to update kms_url: ${(error as Error).message}`, 'warn');
-			}
-
-			const notice = new Notice('✅ 已成功创建页面');
-			notice.noticeEl.createEl('button', {
-				text: '查看页面',
-				cls: 'mod-cta'
-				}).onclick = () => {
-					window.open(resolvedKmsUrl || frontmatter.kms, '_blank');
-				};
+			await this.publishConfluenceWithContext(context);
 		} catch (error) {
 			const message = (error as Error).message || '发布失败';
 			new Notice(message);
 		}
+	}
+
+	private resolveConfluencePublishContext(view: MarkdownView): {
+		file: TFile;
+		parentId: string;
+		vaultPath: string;
+		fallbackUrl: string;
+		kmsOpen: boolean;
+	} | null {
+		const file = this.requireActiveMarkdownFile(view);
+		if (!file || !this.ensureConfluenceSettings()) {
+			return null;
+		}
+		const frontmatter = this.getFileFrontmatter(file);
+		const parentInfo = this.resolveConfluenceParentInfo(frontmatter);
+		if (!parentInfo) {
+			return null;
+		}
+		return {
+			file,
+			parentId: parentInfo.parentId,
+			vaultPath: (this.app.vault.adapter as any).basePath,
+			fallbackUrl: parentInfo.fallbackUrl,
+			kmsOpen: parentInfo.kmsOpen
+		};
+	}
+
+	private async publishConfluenceWithContext(context: {
+		file: TFile;
+		parentId: string;
+		vaultPath: string;
+		fallbackUrl: string;
+		kmsOpen: boolean;
+	}): Promise<void> {
+		new Notice('⏳ 页面发布中...');
+		const title = context.file.basename;
+		const client = this.createConfluenceClient();
+		const publishContent = await this.prepareConfluenceContentForFile(context.file, client);
+		const publisher = this.createConfluencePublisher(client, context.vaultPath);
+		const publishResult = await publisher.publishMarkdownFile({
+			file: context.file,
+			title,
+			parentPageId: context.parentId,
+			rawContent: publishContent
+		});
+		await this.updateKmsUrlFrontmatter(context.file, publishResult.pageUrl);
+		await this.applyConfluenceReadRestriction(client, publishResult.pageId, context.kmsOpen);
+		this.showConfluencePublishNotice(publishResult.pageUrl, context.fallbackUrl);
+	}
+
+	private createConfluenceClient(): ConfluenceClient {
+		return new ConfluenceClient({
+			baseUrl: this.settings.confluenceUrl,
+			spaceKey: this.settings.space,
+			username: this.settings.username,
+			password: this.settings.password
+		});
+	}
+
+	private createConfluencePublisher(client: ConfluenceClient, vaultPath: string): ConfluencePublisher {
+		return new ConfluencePublisher({
+			app: this.app,
+			client,
+			vaultBasePath: vaultPath
+		});
+	}
+
+	private async prepareConfluenceContentForFile(file: TFile, client: ConfluenceClient): Promise<string> {
+		const rawContent = await this.app.vault.read(file);
+		const prepared = await this.prepareConfluencePublishContent(rawContent, client);
+		await this.tryUpdateKmsLinksInNote(file, rawContent, prepared.updatedContent);
+		return prepared.publishContent;
+	}
+
+	private async updateKmsUrlFrontmatter(file: TFile, pageUrl: string): Promise<void> {
+		try {
+			this.log('[Publish to Confluence] Page published successfully');
+			const latestContent = await this.app.vault.read(file);
+			const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(latestContent, pageUrl);
+			if (latestContent !== updatedContent) {
+				await this.app.vault.modify(file, updatedContent);
+				this.log('[Publish to Confluence] kms_url frontmatter updated');
+			}
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to update kms_url: ${(error as Error).message}`, 'warn');
+		}
+	}
+
+	private showConfluencePublishNotice(resolvedUrl: string | null, fallbackUrl: string): void {
+		const notice = new Notice('✅ 已成功创建页面');
+		const targetUrl = resolvedUrl || fallbackUrl;
+		notice.noticeEl.createEl('button', {
+			text: '查看页面',
+			cls: 'mod-cta'
+		}).onclick = () => {
+			window.open(targetUrl, '_blank');
+		};
 	}
 
 	private async resolveConfluencePageUrl(title: string, parentId: string): Promise<string | null> {
@@ -708,6 +740,252 @@ export default class PublishEverywherePlugin extends Plugin {
 		}
 
 		return null;
+	}
+
+	private async prepareConfluencePublishContent(
+		rawContent: string,
+		client: ConfluenceClient
+	): Promise<{ updatedContent: string; publishContent: string }> {
+		const split = this.splitFrontmatterContent(rawContent);
+		const titleCache = new Map<string, string | null>();
+		const result = await replaceBareKmsLinks(split.body, (pageId, url) => {
+			return this.resolveKmsTitleWithCache(pageId, url, client, titleCache);
+		});
+		const publishBody = await replaceWikiLinksWithKmsUrl(result.content, (noteName) => {
+			return this.resolveKmsUrlFromWikiLink(noteName);
+		});
+		const updatedContent = split.hasFrontmatter ? `${split.frontmatter}${result.content}` : result.content;
+		const publishContent = split.hasFrontmatter ? `${split.frontmatter}${publishBody}` : publishBody;
+		return { updatedContent, publishContent };
+	}
+
+	private async resolveKmsTitleWithCache(
+		pageId: string,
+		url: string,
+		client: ConfluenceClient,
+		cache: Map<string, string | null>
+	): Promise<string | null> {
+		if (cache.has(pageId)) {
+			return cache.get(pageId) ?? null;
+		}
+		try {
+			const page = await client.getPageInfoById(pageId);
+			const title = page?.title?.trim() || null;
+			cache.set(pageId, title);
+			return title;
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to resolve title: ${url}`, 'warn');
+			cache.set(pageId, null);
+			return null;
+		}
+	}
+
+	private async tryUpdateKmsLinksInNote(file: TFile, rawContent: string, updatedContent: string): Promise<void> {
+		if (rawContent === updatedContent) {
+			return;
+		}
+		try {
+			await this.app.vault.modify(file, updatedContent);
+			this.log('[Publish to Confluence] KMS links updated');
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to update KMS links: ${(error as Error).message}`, 'warn');
+		}
+	}
+
+	private async resolveKmsUrlFromWikiLink(noteName: string): Promise<string | null> {
+		const file = this.findMarkdownFileByName(noteName);
+		if (!file) {
+			return null;
+		}
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+		const cached = this.normalizeKmsUrl(frontmatter?.kms_url);
+		if (cached) {
+			return cached;
+		}
+		try {
+			const content = await this.app.vault.read(file);
+			return this.extractKmsUrlFromFrontmatter(content);
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to read note: ${file.path}`, 'warn');
+			return null;
+		}
+	}
+
+	private normalizeKmsUrl(value: unknown): string | null {
+		if (typeof value !== 'string') {
+			return null;
+		}
+		const trimmed = value.trim();
+		return trimmed ? trimmed : null;
+	}
+
+	private findMarkdownFileByName(noteName: string): TFile | null {
+		const trimmed = noteName.trim();
+		if (!trimmed) {
+			return null;
+		}
+		let lookup = trimmed.replace(/^\.\//, '').replace(/^\//, '');
+		if (!lookup.toLowerCase().endsWith('.md')) {
+			lookup = `${lookup}.md`;
+		}
+		const direct = this.app.vault.getFileByPath(lookup);
+		if (direct) {
+			return direct;
+		}
+		const baseName = lookup.split('/').pop()?.toLowerCase() || '';
+		const files = this.app.vault.getMarkdownFiles();
+		return files.find(file => file.name.toLowerCase() === baseName)
+			|| files.find(file => file.basename.toLowerCase() === trimmed.toLowerCase())
+			|| null;
+	}
+
+	private extractKmsUrlFromFrontmatter(content: string): string | null {
+		const normalized = content.replace(/\r\n/g, '\n');
+		if (!normalized.startsWith('---\n')) {
+			return null;
+		}
+		const endIndex = normalized.indexOf('\n---', 4);
+		if (endIndex === -1) {
+			return null;
+		}
+		const frontmatter = normalized.slice(4, endIndex).split('\n');
+		for (const line of frontmatter) {
+			const trimmed = line.trim();
+			if (!trimmed || trimmed.startsWith('#')) {
+				continue;
+			}
+			if (trimmed.startsWith('kms_url:')) {
+				const raw = trimmed.substring('kms_url:'.length).trim();
+				const cleaned = raw.replace(/^['"]/, '').replace(/['"]$/, '').trim();
+				return cleaned || null;
+			}
+		}
+		return null;
+	}
+
+	private splitFrontmatterContent(content: string): { frontmatter: string; body: string; hasFrontmatter: boolean } {
+		const normalized = content.replace(/\r\n/g, '\n');
+		if (!normalized.startsWith('---\n')) {
+			return { frontmatter: '', body: content, hasFrontmatter: false };
+		}
+		const lines = normalized.split('\n');
+		let endLine = -1;
+		for (let i = 1; i < lines.length; i++) {
+			const trimmed = lines[i].trim();
+			if (trimmed === '---' || trimmed === '...') {
+				endLine = i;
+				break;
+			}
+		}
+		if (endLine === -1) {
+			return { frontmatter: '', body: content, hasFrontmatter: false };
+		}
+		const sliceIndex = this.computeFrontmatterSliceIndex(lines, endLine, normalized.length);
+		let frontmatter = normalized.slice(0, sliceIndex);
+		let body = normalized.slice(sliceIndex);
+		if (content.includes('\r\n')) {
+			frontmatter = frontmatter.replace(/\n/g, '\r\n');
+			body = body.replace(/\n/g, '\r\n');
+		}
+		return { frontmatter, body, hasFrontmatter: true };
+	}
+
+	private computeFrontmatterSliceIndex(lines: string[], endLine: number, totalLength: number): number {
+		let index = 0;
+		for (let i = 0; i <= endLine; i++) {
+			index += lines[i].length;
+			if (i < lines.length - 1) {
+				index += 1;
+			}
+		}
+		if (index < totalLength) {
+			index += 1;
+		}
+		return index;
+	}
+
+	private requireActiveMarkdownFile(view: MarkdownView): TFile | null {
+		const file = view.file;
+		if (!file) {
+			this.log('[Publish to Confluence] No active file', 'error');
+			new Notice('No file is currently open');
+			return null;
+		}
+		return file;
+	}
+
+	private ensureConfluenceSettings(): boolean {
+		if (this.settings.confluenceUrl && this.settings.username && this.settings.password && this.settings.space) {
+			return true;
+		}
+		this.log('[Publish to Confluence] Missing configuration', 'error');
+		new Notice('请先完成 KMS 配置');
+		return false;
+	}
+
+	private getFileFrontmatter(file: TFile): Record<string, any> | null {
+		return this.app.metadataCache.getFileCache(file)?.frontmatter ?? null;
+	}
+
+	private resolveConfluenceParentInfo(frontmatter: Record<string, any> | null): {
+		parentId: string;
+		fallbackUrl: string;
+		kmsOpen: boolean;
+	} | null {
+		const kmsLink = frontmatter?.kms;
+		if (!kmsLink || typeof kmsLink !== 'string') {
+			this.log('[Publish to Confluence] No KMS URL in frontmatter', 'error');
+			new Notice('当前笔记缺少 KMS Front Matter 信息');
+			return null;
+		}
+		const pageIdMatch = kmsLink.match(/pageId=(\d+)/);
+		if (!pageIdMatch) {
+			this.log('[Publish to Confluence] Could not extract pageId', 'error');
+			new Notice('无法从 KMS 链接中提取 pageId');
+			return null;
+		}
+		return {
+			parentId: pageIdMatch[1],
+			fallbackUrl: kmsLink,
+			kmsOpen: this.resolveKmsOpen(frontmatter)
+		};
+	}
+
+	private resolveKmsOpen(frontmatter: Record<string, any> | null): boolean {
+		const raw = frontmatter?.kms_open;
+		if (raw === undefined || raw === null) {
+			return true;
+		}
+		if (typeof raw === 'boolean') {
+			return raw;
+		}
+		if (typeof raw === 'number') {
+			return raw !== 0;
+		}
+		if (typeof raw === 'string') {
+			const normalized = raw.trim().toLowerCase();
+			if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+				return false;
+			}
+			return true;
+		}
+		return true;
+	}
+
+	private async applyConfluenceReadRestriction(
+		client: ConfluenceClient,
+		pageId: string,
+		kmsOpen: boolean
+	): Promise<void> {
+		if (kmsOpen) {
+			return;
+		}
+		try {
+			await client.setReadRestrictionToUser(pageId, this.settings.username);
+			this.log('[Publish to Confluence] Read restriction applied');
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to apply restriction: ${(error as Error).message}`, 'warn');
+		}
 	}
 
 	/**

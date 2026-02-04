@@ -21,8 +21,13 @@ export class ConfluencePublisher {
 		this.markdownConverter = new ConfluenceMarkdownConverter();
 	}
 
-	async publishMarkdownFile(params: { file: TFile; title: string; parentPageId: string }): Promise<ConfluencePublishResult> {
-		const raw = await this.app.vault.read(params.file);
+	async publishMarkdownFile(params: {
+		file: TFile;
+		title: string;
+		parentPageId: string;
+		rawContent?: string;
+	}): Promise<ConfluencePublishResult> {
+		const raw = params.rawContent ?? (await this.app.vault.read(params.file));
 		const storageHtml = await this.markdownConverter.convert(raw);
 
 		const existing = await this.client.findPageInParent(params.title, params.parentPageId);
@@ -52,4 +57,3 @@ export class ConfluencePublisher {
 		return { pageId, pageUrl: this.client.buildPageUrl(pageId) };
 	}
 }
-

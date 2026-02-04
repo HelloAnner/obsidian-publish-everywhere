@@ -1,4 +1,5 @@
 import { nodeRequest } from './node-http';
+import { buildReadRestrictionPayload } from './kms-restriction-utils';
 
 export interface ConfluencePage {
 	id: string;
@@ -111,6 +112,12 @@ export class ConfluenceClient {
 			body: { storage: { value: params.bodyStorage, representation: 'storage' } },
 			version: { number: versionNumber }
 		};
+		await this.requestJson(url, 'PUT', payload);
+	}
+
+	async setReadRestrictionToUser(pageId: string, username: string): Promise<void> {
+		const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/restriction`;
+		const payload = buildReadRestrictionPayload(username);
 		await this.requestJson(url, 'PUT', payload);
 	}
 
