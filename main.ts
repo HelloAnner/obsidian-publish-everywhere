@@ -82,7 +82,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
 					if (!checking) {
-						this.publishCurrentNoteToConfluence(markdownView);
+						this.enqueuePlatformPublish('confluence', markdownView);
 					}
 					return true;
 				}
@@ -103,7 +103,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
 					if (!checking) {
-						this.publishCurrentNoteToFeishu(markdownView);
+						this.enqueuePlatformPublish('feishu', markdownView);
 					}
 					return true;
 				}
@@ -124,7 +124,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
 					if (!checking) {
-						this.publishCurrentNoteToGitHub(markdownView);
+						this.enqueuePlatformPublish('github', markdownView);
 					}
 					return true;
 				}
@@ -161,7 +161,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
 				if (markdownView) {
 					if (!checking) {
-                        this.publishCurrentNoteToNotion(markdownView as MarkdownView);
+						this.enqueuePlatformPublish('notion', markdownView as MarkdownView);
 					}
 					return true;
 				}
@@ -176,6 +176,20 @@ export default class PublishEverywherePlugin extends Plugin {
 		});
 
 		// 保留一个一键发布命令（已移除重复的“含Notion”命令）
+	}
+
+	private enqueuePlatformPublish(type: 'feishu' | 'confluence' | 'notion' | 'github', view: MarkdownView): void {
+		this.publishQueue.add({
+			type,
+			view
+		});
+
+		const queueStatus = this.publishQueue.getStatus();
+		if (this.publishQueue.processing) {
+			new Notice(`⏳ ${queueStatus}`, 3000);
+		} else {
+			new Notice('⏳ 已加入发布队列...', 2000);
+		}
 	}
 
 	async loadSettings(): Promise<void> {
