@@ -10,7 +10,7 @@ obsidian 内容希望可以直接发布到 confluence中，不需要拷贝和同
 
 ## 3 配置
 
-<img src="img/3518fd470e1b761be4a81c2e786469e0_MD5.png" alt="image" width="300" />
+<img src="img/3518fd470e1b761be4a81c2e786469e0_MD5.png" alt="3518fd470e1b761be4a81c2e786469e0_MD5.png" width="300" />
 
 URL 选择： https://kms.fineres.com
 
@@ -24,14 +24,14 @@ URL 选择： https://kms.fineres.com
 
 在页面最上面，添加 obsidian 的文件属性 （cmd+;） ， 配置 kms 和对应的 **希望发布的父页面的URL**
 
-<img src="img/a64746bc578f8a4d7a727841e3db376d_MD5.png" alt="image" width="300" />
+<img src="img/a64746bc578f8a4d7a727841e3db376d_MD5.png" alt="a64746bc578f8a4d7a727841e3db376d_MD5.png" width="300" />
 
 
 ### 4.2 步骤二： 配置发布的快捷键
 
 配置快捷键，支持在当前的文档下一键发布。
 
-<img src="img/668096ff31085ef6cdc3d795ea927226_MD5.png" alt="image" width="300" />
+<img src="img/668096ff31085ef6cdc3d795ea927226_MD5.png" alt="668096ff31085ef6cdc3d795ea927226_MD5.png" width="300" />
 
 ### 4.3 步骤三： 测试发布
 
@@ -47,7 +47,7 @@ URL 选择： https://kms.fineres.com
 
 可以参考本文的效果，本文是使用快捷键发布的效果，基础的格式都已经支持。 欢迎评论来需求。
 
-<img src="img/ab7ceeb243f1d6a9227cee6ae8eaf9f7_MD5.png" alt="image" width="300" />
+<img src="img/ab7ceeb243f1d6a9227cee6ae8eaf9f7_MD5.png" alt="ab7ceeb243f1d6a9227cee6ae8eaf9f7_MD5.png" width="300" />
 
 ### 5.2 目录宏与图片优化
 
@@ -57,7 +57,7 @@ URL 选择： https://kms.fineres.com
 
 ### 5.3 支持 kms 权限控制
 
-![image](img/9228890841ffd4ce1cae0d54d60fcc17_MD5.png)
+![9228890841ffd4ce1cae0d54d60fcc17_MD5.png](img/9228890841ffd4ce1cae0d54d60fcc17_MD5.png)
 
 添加 obsidian 属性 kms_open ， 默认为 true ，加权限控制；
 
@@ -75,9 +75,9 @@ URL 选择： https://kms.fineres.com
 
 支持类似：
 
-![image](img/1bded22c10a6d6b2069f25c41bbc146d_MD5.png)
+![1bded22c10a6d6b2069f25c41bbc146d_MD5.png](img/1bded22c10a6d6b2069f25c41bbc146d_MD5.png)
 
-的原生 obsidian 高亮块 转为 kms 高亮块；
+原生 obsidian 高亮块 转为 kms 高亮块；
 
 
 ### 5.7 支持修改标题
@@ -97,6 +97,7 @@ URL 选择： https://kms.fineres.com
 默认发布的图片是 500x500 尺寸； 如本页面的截图效果；
 
 支持 Obsidian 的图片尺寸修改语法；
+
 
 
 
