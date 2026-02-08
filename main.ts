@@ -11,6 +11,7 @@ import { CallbackPublishQueue, PublishTask } from './src/publish-queue';
 import { ConfluenceClient } from './src/confluence/confluence-client';
 import { ConfluencePublisher } from './src/confluence/confluence-publisher';
 import { replaceBareKmsLinks, replaceWikiLinksWithKmsUrl } from './src/confluence/kms-link-utils';
+import { GitHubPublisher } from './src/github/github-publisher';
 
 interface ConfluencePublisherSettings {
 	confluenceUrl: string;
@@ -114,6 +115,21 @@ export default class PublishEverywherePlugin extends Plugin {
 					key: 'f'
 				}
 			]
+		});
+
+		this.addCommand({
+			id: 'publish-to-github',
+			name: '发布到GitHub',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+						this.publishCurrentNoteToGitHub(markdownView);
+					}
+					return true;
+				}
+				return false;
+			}
 		});
 
 		this.addCommand({
@@ -595,12 +611,56 @@ export default class PublishEverywherePlugin extends Plugin {
 		}
 	}
 
+	private async publishCurrentNoteToGitHub(view: MarkdownView): Promise<void> {
+		const file = this.requireActiveMarkdownFile(view);
+		if (!file) {
+			return;
+		}
+
+		const frontmatter = this.getFileFrontmatter(file);
+		const githubRepoUrl = this.normalizeGitHubRepoUrl(frontmatter?.github);
+		if (!githubRepoUrl) {
+			this.log('[Publish to GitHub] Missing github frontmatter', 'error');
+			new Notice('当前笔记缺少 github Front Matter 信息');
+			return;
+		}
+
+		try {
+			new Notice('⏳ 正在发布到 GitHub...');
+			const vaultPath = (this.app.vault.adapter as any).basePath;
+			const publisher = new GitHubPublisher({
+				app: this.app,
+				vaultBasePath: vaultPath
+			});
+			await this.ensureFileSaved(file);
+			const rawContent = await this.app.vault.read(file);
+			const result = await publisher.publishMarkdownFile({
+				file,
+				repoUrl: githubRepoUrl,
+				rawContent
+			});
+
+			if (result.updated) {
+				new Notice('✅ GitHub README 已更新');
+			} else {
+				new Notice('✅ GitHub 内容无变化，无需更新');
+			}
+
+			this.log(`[Publish to GitHub] Completed: ${result.repoUrl}#${result.branch}`);
+		} catch (error) {
+			const message = (error as Error).message || '发布失败';
+			this.log(`[Publish to GitHub] Failed: ${message}`, 'error');
+			new Notice(`❌ 发布到 GitHub 失败: ${message}`);
+		}
+	}
+
 	private resolveConfluencePublishContext(view: MarkdownView): {
 		file: TFile;
 		parentId: string;
 		vaultPath: string;
 		fallbackUrl: string;
 		kmsOpen: boolean;
+		targetPageId: string | null;
 	} | null {
 		const file = this.requireActiveMarkdownFile(view);
 		if (!file || !this.ensureConfluenceSettings()) {
@@ -616,7 +676,8 @@ export default class PublishEverywherePlugin extends Plugin {
 			parentId: parentInfo.parentId,
 			vaultPath: (this.app.vault.adapter as any).basePath,
 			fallbackUrl: parentInfo.fallbackUrl,
-			kmsOpen: parentInfo.kmsOpen
+			kmsOpen: parentInfo.kmsOpen,
+			targetPageId: this.resolveKmsTargetPageId(frontmatter)
 		};
 	}
 
@@ -626,6 +687,7 @@ export default class PublishEverywherePlugin extends Plugin {
 		vaultPath: string;
 		fallbackUrl: string;
 		kmsOpen: boolean;
+		targetPageId: string | null;
 	}): Promise<void> {
 		new Notice('⏳ 页面发布中...');
 		const title = context.file.basename;
@@ -636,10 +698,12 @@ export default class PublishEverywherePlugin extends Plugin {
 			file: context.file,
 			title,
 			parentPageId: context.parentId,
+			targetPageId: context.targetPageId ?? undefined,
 			rawContent: publishContent
 		});
-		await this.updateKmsUrlFrontmatter(context.file, publishResult.pageUrl);
 		await this.applyConfluenceReadRestriction(client, publishResult.pageId, context.kmsOpen);
+		const actualKmsOpen = await this.resolveActualKmsOpen(client, publishResult.pageId, context.kmsOpen);
+		await this.updateKmsFrontmatter(context.file, publishResult.pageUrl, actualKmsOpen);
 		this.showConfluencePublishNotice(publishResult.pageUrl, context.fallbackUrl);
 	}
 
@@ -667,17 +731,26 @@ export default class PublishEverywherePlugin extends Plugin {
 		return prepared.publishContent;
 	}
 
-	private async updateKmsUrlFrontmatter(file: TFile, pageUrl: string): Promise<void> {
+	private async updateKmsFrontmatter(file: TFile, pageUrl: string, kmsOpen: boolean): Promise<void> {
 		try {
 			this.log('[Publish to Confluence] Page published successfully');
 			const latestContent = await this.app.vault.read(file);
-			const updatedContent = this.markdownProcessor.addOrUpdateKmsUrl(latestContent, pageUrl);
+			const updatedContent = this.markdownProcessor.addOrUpdateKmsFrontmatter(latestContent, pageUrl, kmsOpen);
 			if (latestContent !== updatedContent) {
 				await this.app.vault.modify(file, updatedContent);
-				this.log('[Publish to Confluence] kms_url frontmatter updated');
+				this.log(`[Publish to Confluence] kms_url and kms_open frontmatter updated (kms_open=${kmsOpen})`);
 			}
 		} catch (error) {
-			this.log(`[Publish to Confluence] Failed to update kms_url: ${(error as Error).message}`, 'warn');
+			this.log(`[Publish to Confluence] Failed to update kms frontmatter: ${(error as Error).message}`, 'warn');
+		}
+	}
+
+	private async resolveActualKmsOpen(client: ConfluenceClient, pageId: string, expectedKmsOpen: boolean): Promise<boolean> {
+		try {
+			return await client.isPageReadOpen(pageId);
+		} catch (error) {
+			this.log(`[Publish to Confluence] Failed to resolve online read restriction, fallback to local kms_open: ${(error as Error).message}`, 'warn');
+			return expectedKmsOpen;
 		}
 	}
 
@@ -970,6 +1043,30 @@ export default class PublishEverywherePlugin extends Plugin {
 			return true;
 		}
 		return true;
+	}
+
+	private resolveKmsTargetPageId(frontmatter: Record<string, any> | null): string | null {
+		const kmsUrl = this.normalizeKmsUrl(frontmatter?.kms_url);
+		if (!kmsUrl) {
+			return null;
+		}
+		const match = kmsUrl.match(/[?&]pageId=(\d+)/);
+		if (!match) {
+			this.log(`[Publish to Confluence] Invalid kms_url, fallback to title matching: ${kmsUrl}`, 'warn');
+			return null;
+		}
+		return match[1];
+	}
+
+	private normalizeGitHubRepoUrl(value: unknown): string | null {
+		if (typeof value !== 'string') {
+			return null;
+		}
+		const trimmed = value.trim();
+		if (!trimmed) {
+			return null;
+		}
+		return trimmed;
 	}
 
 	private async applyConfluenceReadRestriction(
@@ -1389,9 +1486,10 @@ export default class PublishEverywherePlugin extends Plugin {
 		if (frontmatter.kms) platforms.push('KMS');
 		if (frontmatter.feishu) platforms.push('飞书');
 		if (frontmatter.notion || frontmatter.notion_url) platforms.push('Notion');
+		if (frontmatter.github) platforms.push('GitHub');
 
 		if (platforms.length === 0) {
-			new Notice('❌ 当前笔记没有配置任何发布平台（kms 或 feishu）');
+			new Notice('❌ 当前笔记没有配置任何发布平台（kms / feishu / notion / github）');
 			return;
 		}
 
@@ -1453,6 +1551,23 @@ export default class PublishEverywherePlugin extends Plugin {
 				results.push({ platform: 'Notion', success: false, error: (error as Error).message });
 				this.log(`Notion 发布失败: ${(error as Error).message}`, 'error');
 				new Notice(`❌ Notion 发布失败: ${(error as Error).message}`, 4000);
+			}
+
+			if (platforms.length > 1) {
+				await new Promise(resolve => setTimeout(resolve, 1000));
+			}
+		}
+
+		if (frontmatter.github) {
+			try {
+				this.log('Publishing to GitHub...');
+				await this.publishCurrentNoteToGitHub(view);
+				results.push({ platform: 'GitHub', success: true });
+				new Notice('✅ GitHub 发布成功', 2000);
+			} catch (error) {
+				results.push({ platform: 'GitHub', success: false, error: (error as Error).message });
+				this.log(`GitHub 发布失败: ${(error as Error).message}`, 'error');
+				new Notice(`❌ GitHub 发布失败: ${(error as Error).message}`, 4000);
 			}
 
 			if (platforms.length > 1) {
@@ -1568,11 +1683,17 @@ export default class PublishEverywherePlugin extends Plugin {
                         await this.publishCurrentNoteToConfluence(task.view);
 					}
 					break;
-			case 'notion':
-				if (task.view) {
-					await this.publishCurrentNoteToNotion(task.view);
-				}
-				break;				case 'all':
+				case 'notion':
+					if (task.view) {
+						await this.publishCurrentNoteToNotion(task.view);
+					}
+					break;
+				case 'github':
+					if (task.view) {
+						await this.publishCurrentNoteToGitHub(task.view);
+					}
+					break;
+				case 'all':
 					if (task.view) {
 						await this.publishToAllPlatformsInternal(task.view);
 					}

@@ -12,6 +12,7 @@ export class ConfluenceMarkdownConverter {
 		content = preprocessUrls(content);
 		content = preProcessMermaid(content);
 		content = preProcessFolding(content);
+		content = preProcessCallouts(content);
 
 		const html = await markdownToHtml(content);
 		let result = html;
@@ -21,6 +22,7 @@ export class ConfluenceMarkdownConverter {
 		result = postProcessFolding(result);
 		result = postProcessTables(result);
 		result = postProcessMarkHighlights(result);
+		result = postProcessCallouts(result);
 		result = addTOCMacro(result);
 
 		return result;
@@ -178,6 +180,41 @@ function preProcessFolding(content: string): string {
 	return content.includes('\r\n') ? out2.join('\n').replace(/\n/g, '\r\n') : out2.join('\n');
 }
 
+function preProcessCallouts(content: string): string {
+	const normalized = content.replace(/\r\n/g, '\n');
+	const lines = normalized.split('\n');
+	const out: string[] = [];
+
+	for (let i = 0; i < lines.length; i++) {
+		const line = lines[i];
+		const startMatch = /^>\s*\[!([^\]\n]+)\][+-]?\s*(.*)$/.exec(line);
+		if (!startMatch) {
+			out.push(line);
+			continue;
+		}
+
+		const calloutType = (startMatch[1] || '').trim().toLowerCase();
+		const calloutTitle = (startMatch[2] || '').trim();
+		const bodyLines: string[] = [];
+
+		let cursor = i + 1;
+		while (cursor < lines.length && /^>\s?/.test(lines[cursor])) {
+			bodyLines.push(lines[cursor].replace(/^>\s?/, ''));
+			cursor += 1;
+		}
+
+		const calloutBody = bodyLines.join('\n').trimEnd();
+		const encodedType = encodeURIComponent(calloutType);
+		const encodedTitle = encodeURIComponent(calloutTitle);
+		const encodedBody = encodeURIComponent(calloutBody);
+		out.push(`CALLOUT_PLACEHOLDER_TYPE:${encodedType}:TITLE:${encodedTitle}:CONTENT:${encodedBody}:CALLOUT_PLACEHOLDER`);
+
+		i = cursor - 1;
+	}
+
+	return content.includes('\r\n') ? out.join('\n').replace(/\n/g, '\r\n') : out.join('\n');
+}
+
 function postProcessFolding(content: string): string {
 	const re = /FOLD_PLACEHOLDER_TITLE:([^:]*?):CONTENT:([\s\S]*?):FOLD_PLACEHOLDER/g;
 	return content.replace(re, (match: string, title: string, foldContent: string) => {
@@ -194,6 +231,56 @@ function postProcessFolding(content: string): string {
 			return match;
 		}
 	});
+}
+
+function postProcessCallouts(content: string): string {
+	const re = /CALLOUT_PLACEHOLDER_TYPE:([^:]*?):TITLE:([^:]*?):CONTENT:([^:]*?):CALLOUT_PLACEHOLDER/g;
+	return content.replace(re, (match: string, encodedType: string, encodedTitle: string, encodedBody: string) => {
+		try {
+			const calloutType = decodeURIComponent(encodedType || '').trim().toLowerCase();
+			const rawTitle = decodeURIComponent(encodedTitle || '').trim();
+			const rawBody = decodeURIComponent(encodedBody || '').trim();
+
+			const mappedMacro = mapCalloutMacro(calloutType);
+			const title = rawTitle || mappedMacro.defaultTitle;
+			const bodyMarkdown = rawBody || rawTitle;
+			const nested = bodyMarkdown ? markdownToHtmlSyncBestEffort(bodyMarkdown) : '<p></p>';
+			const nestedProcessed = postProcessMarkHighlights(postProcessTables(postProcessLinks(nested)));
+			const nestedEscaped = escapeCDATA(nestedProcessed);
+			const titleParam = title
+				? `<ac:parameter ac:name="title">${escapeXml(title)}</ac:parameter>`
+				: '';
+
+			return (
+				`<ac:structured-macro ac:name="${mappedMacro.macroName}">` +
+				titleParam +
+				`<ac:rich-text-body>${nestedEscaped}</ac:rich-text-body>` +
+				`</ac:structured-macro>`
+			);
+		} catch (_e) {
+			return match;
+		}
+	});
+}
+
+function mapCalloutMacro(calloutType: string): { macroName: string; defaultTitle: string } {
+	const type = (calloutType || '').toLowerCase();
+	if (type === 'info') {
+		return { macroName: 'info', defaultTitle: '信息' };
+	}
+	if (type === 'tip' || type === 'hint') {
+		return { macroName: 'tip', defaultTitle: '提示' };
+	}
+	if (type === 'warning' || type === 'caution' || type === 'danger' || type === 'error') {
+		return { macroName: 'warning', defaultTitle: '警告' };
+	}
+	if (type === 'success') {
+		return { macroName: 'note', defaultTitle: '成功' };
+	}
+	if (type === 'question' || type === 'help' || type === 'faq') {
+		return { macroName: 'note', defaultTitle: '说明' };
+	}
+	return { macroName: 'note', defaultTitle: '提示' };
 }
 
 function markdownToHtmlSyncBestEffort(markdown: string): string {
@@ -368,4 +455,13 @@ function rgbToHex(r: number, g: number, b: number): string {
 function toHex(n: number): string {
 	const v = Math.max(0, Math.min(255, Math.round(n)));
 	return v.toString(16).padStart(2, '0').toUpperCase();
+}
+
+function escapeXml(s: string): string {
+	return s
+		.replace(/&/g, '&amp;')
+		.replace(/</g, '&lt;')
+		.replace(/>/g, '&gt;')
+		.replace(/"/g, '&quot;')
+		.replace(/'/g, '&#39;');
 }

@@ -116,9 +116,65 @@ export class ConfluenceClient {
 	}
 
 	async setReadRestrictionToUser(pageId: string, username: string): Promise<void> {
-		const url = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/restriction`;
+		const primaryUrl = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/restriction`;
+		const fallbackUrl = `${this.baseUrl}/rest/experimental/content/${encodeURIComponent(pageId)}/restriction`;
 		const payload = buildReadRestrictionPayload(username);
-		await this.requestJson(url, 'PUT', payload);
+		try {
+			await this.requestJson(primaryUrl, 'PUT', payload);
+			return;
+		} catch (error) {
+			if (!this.shouldFallbackToExperimentalRestrictionApi(error)) {
+				throw error;
+			}
+		}
+		await this.requestJson(fallbackUrl, 'PUT', payload);
+	}
+
+	async isPageReadOpen(pageId: string): Promise<boolean> {
+		const primaryUrl = `${this.baseUrl}/rest/api/content/${encodeURIComponent(pageId)}/restriction/byOperation/read`;
+		try {
+			const readInfo = await this.requestJson(primaryUrl, 'GET');
+			return this.isRestrictionOpen(readInfo?.restrictions);
+		} catch (error) {
+			if (!this.shouldFallbackToExperimentalRestrictionApi(error)) {
+				throw error;
+			}
+		}
+
+		const fallbackUrl = `${this.baseUrl}/rest/experimental/content/${encodeURIComponent(pageId)}/restriction`;
+		const restrictionInfo = await this.requestJson(fallbackUrl, 'GET');
+		const results = Array.isArray(restrictionInfo?.results) ? restrictionInfo.results : [];
+		const readOperation = results.find((item: any) => item?.operation === 'read');
+		return this.isRestrictionOpen(readOperation?.restrictions);
+	}
+
+	private shouldFallbackToExperimentalRestrictionApi(error: unknown): boolean {
+		if (!(error instanceof ConfluenceHttpError)) {
+			return false;
+		}
+		return error.status === 404 || error.status === 405;
+	}
+
+	private isRestrictionOpen(restrictions: any): boolean {
+		const hasUserRestriction = this.hasRestrictionItems(restrictions?.user);
+		const hasGroupRestriction = this.hasRestrictionItems(restrictions?.group);
+		return !hasUserRestriction && !hasGroupRestriction;
+	}
+
+	private hasRestrictionItems(entity: any): boolean {
+		if (!entity) {
+			return false;
+		}
+
+		if (typeof entity.size === 'number') {
+			return entity.size > 0;
+		}
+
+		if (Array.isArray(entity.results)) {
+			return entity.results.length > 0;
+		}
+
+		return false;
 	}
 
 	async getAttachments(pageId: string): Promise<ConfluenceAttachment[]> {
@@ -231,16 +287,32 @@ export class ConfluenceClient {
 				return safeJson(text);
 			}
 			if (method === 'GET' || !this.isXsrfFailure(res.status, text)) {
-				throw new Error(`[Confluence] ${method} ${url} HTTP ${res.status} ${text}`.trim());
+				throw new ConfluenceHttpError(method, url, res.status, text);
 			}
 		}
 
-		throw new Error(`[Confluence] ${method} ${url} HTTP 403 XSRF check failed`.trim());
+		throw new ConfluenceHttpError(method, url, 403, 'XSRF check failed');
 	}
 
 	private basicAuthHeader(): string {
 		const token = Buffer.from(`${this.username}:${this.password}`).toString('base64');
 		return `Basic ${token}`;
+	}
+}
+
+class ConfluenceHttpError extends Error {
+	readonly method: string;
+	readonly url: string;
+	readonly status: number;
+	readonly responseText: string;
+
+	constructor(method: string, url: string, status: number, responseText: string) {
+		super(`[Confluence] ${method} ${url} HTTP ${status} ${responseText}`.trim());
+		this.name = 'ConfluenceHttpError';
+		this.method = method;
+		this.url = url;
+		this.status = status;
+		this.responseText = responseText;
 	}
 }
 

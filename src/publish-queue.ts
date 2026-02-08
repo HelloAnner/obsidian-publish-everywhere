@@ -4,7 +4,7 @@ import { Notice, TFile, MarkdownView } from 'obsidian';
  * 发布任务类型
  */
 export interface PublishTask {
-	type: 'feishu' | 'confluence' | 'notion' | 'all';
+	type: 'feishu' | 'confluence' | 'notion' | 'github' | 'all';
 	file?: TFile;
 	view?: MarkdownView;
 }

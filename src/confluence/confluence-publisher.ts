@@ -25,12 +25,13 @@ export class ConfluencePublisher {
 		file: TFile;
 		title: string;
 		parentPageId: string;
+		targetPageId?: string;
 		rawContent?: string;
 	}): Promise<ConfluencePublishResult> {
 		const raw = params.rawContent ?? (await this.app.vault.read(params.file));
 		const storageHtml = await this.markdownConverter.convert(raw);
 
-		const existing = await this.client.findPageInParent(params.title, params.parentPageId);
+		const existing = await this.resolveExistingPage(params);
 		const attachmentPageId = existing ? existing.id : params.parentPageId;
 
 		const imageHandler = new ConfluenceImageHandler({
@@ -55,5 +56,27 @@ export class ConfluencePublisher {
 		}
 
 		return { pageId, pageUrl: this.client.buildPageUrl(pageId) };
+	}
+
+	private async resolveExistingPage(params: {
+		title: string;
+		parentPageId: string;
+		targetPageId?: string;
+	}): Promise<{ id: string; title: string; version?: { number: number } } | null> {
+		const targetPageId = params.targetPageId?.trim();
+		if (targetPageId) {
+			try {
+				const page = await this.client.getPageInfoById(targetPageId);
+				return {
+					id: page.id,
+					title: page.title,
+					version: page.version
+				};
+			} catch (_error) {
+				// kms_url 指向页面不可用时，降级为原有标题匹配逻辑
+			}
+		}
+
+		return this.client.findPageInParent(params.title, params.parentPageId);
 	}
 }

@@ -1180,10 +1180,11 @@ export class MarkdownProcessor {
 		return [...frontMatterLines, ...contentLines].join('\n');
 	}
 
-	addOrUpdateKmsUrl(content: string, kmsUrl: string): string {
+	addOrUpdateKmsFrontmatter(content: string, kmsUrl: string, kmsOpen: boolean): string {
 		if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
 			const newFrontMatter = [
 				'---',
+				`kms_open: ${kmsOpen ? 'true' : 'false'}`,
 				`kms_url: "${kmsUrl}"`,
 				'---',
 				''
@@ -1208,6 +1209,7 @@ export class MarkdownProcessor {
 		const frontMatterLines = lines.slice(0, endIndex + 1);
 		const contentLines = lines.slice(endIndex + 1);
 		let kmsUpdated = false;
+		let kmsOpenUpdated = false;
 
 		for (let i = 1; i < frontMatterLines.length - 1; i++) {
 			const trimmedLine = frontMatterLines[i].trim();
@@ -1218,12 +1220,20 @@ export class MarkdownProcessor {
 			if (key === 'kms_url') {
 				frontMatterLines[i] = `kms_url: "${kmsUrl}"`;
 				kmsUpdated = true;
-				break;
+				continue;
+			}
+			if (key === 'kms_open') {
+				frontMatterLines[i] = `kms_open: ${kmsOpen ? 'true' : 'false'}`;
+				kmsOpenUpdated = true;
 			}
 		}
 
 		if (!kmsUpdated) {
 			frontMatterLines.splice(frontMatterLines.length - 1, 0, `kms_url: "${kmsUrl}"`);
+		}
+
+		if (!kmsOpenUpdated) {
+			frontMatterLines.splice(frontMatterLines.length - 1, 0, `kms_open: ${kmsOpen ? 'true' : 'false'}`);
 		}
 
 		return [...frontMatterLines, ...contentLines].join('\n');
