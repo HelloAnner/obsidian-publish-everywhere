@@ -8,6 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { createHash } from 'crypto';
 import type { App, TFile } from 'obsidian';
 import { Debug } from '../debug';
 import { LlmService } from '../shared/llm-service';
@@ -246,24 +247,28 @@ export class XiaohongshuPublisher {
 		if (attachments.length === 0) {
 			return 0;
 		}
-
-		let count = 0;
-		for (const attachment of attachments) {
-			const imageIndex = exportedImages.length + 1;
-			const destPath = path.join(outputDir, `${imageIndex}.png`);
-			await this.convertAttachmentToPng(attachment.absolutePath, destPath);
-			exportedImages.push({
-				index: imageIndex,
-				path: destPath,
-				caption: `原图：${attachment.name}`,
-				styleName,
-				type: 'viewpoint'
-			});
-			count += 1;
-			report(`已追加原图 ${count}/${attachments.length}`);
+		const selected = this.selectPreferredSourceAttachment(attachments);
+		if (!selected) {
+			return 0;
 		}
 
-		return count;
+		const imageIndex = exportedImages.length + 1;
+		const destPath = path.join(outputDir, `${imageIndex}.png`);
+		await this.convertAttachmentToPng(selected.absolutePath, destPath);
+		if (this.isDuplicatePng(destPath, exportedImages)) {
+			fs.unlinkSync(destPath);
+			report('检测到原图与已生成图片重复，已跳过追加');
+			return 0;
+		}
+		exportedImages.push({
+			index: imageIndex,
+			path: destPath,
+			caption: `原图：${selected.name}`,
+			styleName,
+			type: 'viewpoint'
+		});
+		report(`已追加原图 1/1`);
+		return 1;
 	}
 
 	private collectAttachmentFiles(notePath: string, markdown: string): Array<{ name: string; absolutePath: string }> {
@@ -409,6 +414,67 @@ export class XiaohongshuPublisher {
 	private isSupportedImageFile(filePath: string): boolean {
 		const ext = path.extname(filePath).toLowerCase();
 		return ['.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp', '.svg'].includes(ext);
+	}
+
+	private selectPreferredSourceAttachment(
+		attachments: Array<{ name: string; absolutePath: string }>
+	): { name: string; absolutePath: string } | null {
+		if (attachments.length === 0) {
+			return null;
+		}
+
+		const normal = attachments.filter(item => !this.looksLikeGeneratedImage(item));
+		if (normal.length > 0) {
+			return normal[0];
+		}
+
+		return attachments[0];
+	}
+
+	private looksLikeGeneratedImage(item: { name: string; absolutePath: string }): boolean {
+		const filename = item.name.toLowerCase();
+		const fullpath = item.absolutePath.toLowerCase();
+		if (/^\d+\s*[._-]?/.test(filename)) {
+			return true;
+		}
+		if (/xhs|xiaohongshu|xhs-card|_md5/.test(filename)) {
+			return true;
+		}
+		if (fullpath.includes('/downloads/xiaohongshu-')) {
+			return true;
+		}
+		return false;
+	}
+
+	private isDuplicatePng(newImagePath: string, exportedImages: XiaohongshuRenderedImage[]): boolean {
+		if (!fs.existsSync(newImagePath)) {
+			return false;
+		}
+		const newHash = this.computeFileSha1(newImagePath);
+		if (!newHash) {
+			return false;
+		}
+
+		for (const image of exportedImages) {
+			if (!fs.existsSync(image.path)) {
+				continue;
+			}
+			const oldHash = this.computeFileSha1(image.path);
+			if (oldHash && oldHash === newHash) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	private computeFileSha1(filePath: string): string | null {
+		try {
+			const data = fs.readFileSync(filePath);
+			return createHash('sha1').update(data).digest('hex');
+		} catch (_error) {
+			return null;
+		}
 	}
 
 	private nextStyleSeed(previous: number): number {

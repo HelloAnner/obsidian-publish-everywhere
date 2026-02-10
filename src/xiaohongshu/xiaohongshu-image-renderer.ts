@@ -195,9 +195,9 @@ export class XiaohongshuImageRenderer {
 			throw new Error(`观点索引越界: ${item.pointIndex}`);
 		}
 
-		const pointTitle = item.titleOverride || point.title;
-		const pointArgument = item.argumentOverride || point.argument;
-		const pointConclusion = item.conclusionOverride || point.conclusion;
+		const pointTitle = item.titleOverride !== undefined ? item.titleOverride : point.title;
+		const pointArgument = item.argumentOverride !== undefined ? item.argumentOverride : point.argument;
+		const pointConclusion = item.conclusionOverride !== undefined ? item.conclusionOverride : point.conclusion;
 
 		// 标题分行
 		const titleLines = this.wrapTextLines(pointTitle, 18, 2);
@@ -325,7 +325,7 @@ export class XiaohongshuImageRenderer {
 			throw new Error(`结论索引越界: ${item.pointIndex}`);
 		}
 
-		const pointConclusion = item.conclusionOverride || point.conclusion;
+		const pointConclusion = item.conclusionOverride !== undefined ? item.conclusionOverride : point.conclusion;
 		const conclusionLines = this.wrapTextLines(pointConclusion, 10, 4);
 		const conclusionY = 600;
 		const conclusionLineHeight = style.subtitleSize * 1.8;
@@ -447,11 +447,15 @@ export class XiaohongshuImageRenderer {
 
 	private expandImagePlan(imagePlan: ImagePlanItem[], content: XiaohongshuContentStructure): ImagePlanItem[] {
 		const expanded: ImagePlanItem[] = [];
-		const source = imagePlan.length > 0 ? imagePlan : this.buildFallbackPlan(content.subPoints.length);
+		const dedupedContent = {
+			...content,
+			subPoints: this.deduplicatePoints(content.subPoints)
+		};
+		const source = imagePlan.length > 0 ? imagePlan : this.buildFallbackPlan(dedupedContent.subPoints.length);
 
 		for (const item of source) {
 			if (item.type === 'viewpoint' || item.type === 'argument' || item.type === 'conclusion') {
-				expanded.push(...this.expandPointItem(item, content));
+				expanded.push(...this.expandPointItem(item, dedupedContent));
 				continue;
 			}
 
@@ -469,21 +473,50 @@ export class XiaohongshuImageRenderer {
 
 		const argumentSegments = this.splitByVisualCapacity(point.argument, 760, 250, 18, 1.02);
 		const conclusionSegments = this.splitByVisualCapacity(point.conclusion, 720, 145, 20, 1.05);
-		const segmentTotal = Math.max(argumentSegments.length, conclusionSegments.length, 1);
+		const segmentTotal = Math.max(argumentSegments.length, 1);
+		const hasIndependentConclusionPages = conclusionSegments.length > 1;
 		const results: ImagePlanItem[] = [];
 
 		for (let i = 0; i < segmentTotal; i++) {
+			const argumentText = argumentSegments[i] || argumentSegments[argumentSegments.length - 1] || point.argument;
+			const conclusionText = this.pickSegmentConclusion(
+				conclusionSegments,
+				hasIndependentConclusionPages,
+				i,
+				point.conclusion
+			);
 			results.push({
 				...item,
 				titleOverride: segmentTotal > 1 ? `${point.title}（${i + 1}/${segmentTotal}）` : point.title,
-				argumentOverride: argumentSegments[i] || argumentSegments[argumentSegments.length - 1] || point.argument,
-				conclusionOverride: conclusionSegments[i] || conclusionSegments[conclusionSegments.length - 1] || point.conclusion,
+				argumentOverride: argumentText,
+				conclusionOverride: conclusionText,
 				segmentIndex: i + 1,
 				segmentTotal
 			});
 		}
 
 		return results;
+	}
+
+	private pickSegmentConclusion(
+		conclusionSegments: string[],
+		hasIndependentConclusionPages: boolean,
+		segmentIndex: number,
+		fallback: string
+	): string {
+		if (conclusionSegments.length === 0) {
+			return fallback;
+		}
+
+		if (hasIndependentConclusionPages) {
+			return conclusionSegments[segmentIndex] || conclusionSegments[conclusionSegments.length - 1] || fallback;
+		}
+
+		if (segmentIndex === 0) {
+			return conclusionSegments[0] || fallback;
+		}
+
+		return '';
 	}
 
 	private buildFallbackPlan(subPointsCount: number): ImagePlanItem[] {
@@ -520,6 +553,44 @@ export class XiaohongshuImageRenderer {
 			segments.push(lines.slice(i, i + linesPerPage).join(''));
 		}
 		return segments;
+	}
+
+	private deduplicatePoints(points: XiaohongshuContentStructure['subPoints']): XiaohongshuContentStructure['subPoints'] {
+		const deduped: XiaohongshuContentStructure['subPoints'] = [];
+		for (const point of points) {
+			const normalized = this.normalizePointText(`${point.title}${point.argument}${point.conclusion}`);
+			const duplicated = deduped.some(existing => {
+				const existingNormalized = this.normalizePointText(`${existing.title}${existing.argument}${existing.conclusion}`);
+				return this.isSamePoint(normalized, existingNormalized);
+			});
+			if (!duplicated) {
+				deduped.push(point);
+			}
+		}
+		return deduped;
+	}
+
+	private normalizePointText(text: string): string {
+		return text
+			.toLowerCase()
+			.replace(/观点\s*\d+/g, '')
+			.replace(/[\s\p{P}\p{S}]+/gu, '')
+			.trim();
+	}
+
+	private isSamePoint(a: string, b: string): boolean {
+		if (!a || !b) {
+			return false;
+		}
+		if (a.includes(b) || b.includes(a)) {
+			return true;
+		}
+		const short = a.length <= b.length ? a : b;
+		const long = a.length <= b.length ? b : a;
+		if (short.length >= 8 && long.includes(short.slice(0, 8))) {
+			return true;
+		}
+		return false;
 	}
 
 	private async collectAttachmentImages(sourceFile: TFile): Promise<Array<{ name: string; absolutePath: string }>> {

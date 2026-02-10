@@ -12,6 +12,7 @@ import type { XiaohongshuStylePreset } from '../xiaohongshu/xiaohongshu-style-pr
 
 export class LlmService {
 	private readonly settings: AutomationSharedSettings;
+	private static readonly FIXED_AI_TAG = 'AI 协助创作';
 
 	constructor(settings: AutomationSharedSettings) {
 		this.settings = settings;
@@ -134,7 +135,7 @@ export class LlmService {
 			'  "content": {',
 			'    "title": "主标题，16-20字，抓人眼球",',
 			'    "createdAt": "笔记创建时间，如 2026年2月6日",',
-			'    "noteText": "小红书风格的正文，300-600字，真诚有故事感，包含个人场景、思考过程、行动建议",',
+				'    "noteText": "观点型正文，300-600字，围绕图文观点做结构化说明：核心结论、关键依据、执行建议",',
 			'    "coreViewpoint": "核心观点，一句话概括全文精华，18-26字",',
 			'    "subPoints": [',
 			'      {',
@@ -162,11 +163,11 @@ export class LlmService {
 			'1. content: 内容结构',
 			'   - title: 主标题，醒目有力，能概括全文；优先使用【优先标题】作为标题，最多只做轻微润色，不要偏离原题',
 			'   - createdAt: 从笔记中提取的时间，格式统一为"YYYY年M月D日"',
-			'   - noteText: 小红书正文风格，300-600字，包含：',
-			'       * 开篇引入（个人场景/问题）',
-			'       * 中间展开（2-3个要点）',
-			'       * 结尾行动号召或感悟',
-			'       * 用“直接结论+可执行建议”的表达，不使用“原笔记/本文/上文/作者在笔记里”等引用来源措辞',
+				'   - noteText: 观点说明文风，300-600字，包含：',
+				'       * 开篇直接给核心结论（不要讲个人经历）',
+				'       * 中间按图文观点逐条解释依据与因果',
+				'       * 结尾给可执行建议或判断标准',
+				'       * 用“直接结论+可执行建议”的表达，不使用“原笔记/本文/上文/作者在笔记里”等引用来源措辞',
 			'   - coreViewpoint: 一句话核心观点，要有洞察力，18-26字',
 			'   - subPoints: 3-4个子观点，每个包含：',
 			'       * 标题：明确表达观点立场',
@@ -185,7 +186,7 @@ export class LlmService {
 			'2. 信息无损：原素材中的关键观点必须全部体现在 subPoints 中，不得遗漏，可扩充但不能替换原意',
 			'3. 面向外部读者：直接输出结论与观点，不出现“原笔记提到/文中提到/作者写道”等来源指代',
 			'4. 层次分明：标题亮观点 → 论据讲透彻（案例/对比/引用） → 结论给金句',
-			'5. 真诚有料：像资深博主分享干货，不是AI罗列要点',
+				'5. 文风要求：以观点阐述为主，不写故事化叙事，不使用“我今天/昨晚/一路走来”等经历口吻',
 			'6. 可包含适量emoji增强可读性',
 			'7. 所有文字必须符合小红书平台的调性',
 			'8. 不允许出现“…”、“......”、“省略”这类未说完整的表达',
@@ -208,9 +209,9 @@ export class LlmService {
 
 		// 构建默认内容
 		const defaultContent: XiaohongshuContentStructure = {
-			title: '今天我把一个方法论真正用起来了',
+			title: '把方法论落成可执行动作',
 			createdAt: new Date().toLocaleDateString('zh-CN'),
-			noteText: '把注意力收回来，把行动压缩到今天，很多焦虑就会慢慢退场。',
+			noteText: '先明确核心结论，再逐条给出依据与执行建议，才能让观点被完整理解并被实际采用。',
 			coreViewpoint: '行动是缓解焦虑最好的解药',
 			subPoints: [
 				{
@@ -277,25 +278,27 @@ export class LlmService {
 			argument: this.safeString(item?.argument, '深入思考，找到问题的本质。'),
 			conclusion: this.safeString(item?.conclusion, '行动是最好的答案。')
 		}));
+		const deduped = this.deduplicateSubPoints(points);
 
-		return points.length >= 2 ? points : fallback;
+		return deduped.length >= 2 ? deduped : fallback;
 	}
 
 	private normalizeTags(rawTags: unknown): string[] {
-		if (!Array.isArray(rawTags)) {
-			return ['个人成长', '方法论', '效率'];
+		const baseTags = Array.isArray(rawTags)
+			? rawTags.map(item => String(item || '').trim().replace(/^#/, '')).filter(Boolean)
+			: ['个人成长', '方法论', '效率'];
+
+		const unique: string[] = [];
+		for (const tag of baseTags) {
+			if (!unique.includes(tag)) {
+				unique.push(tag);
+			}
 		}
 
-		const tags = rawTags
-			.map(item => String(item || '').trim().replace(/^#/, ''))
-			.filter(Boolean)
-			.slice(0, 6);
-
-		if (tags.length === 0) {
-			return ['个人成长', '方法论', '效率'];
-		}
-
-		return tags;
+		const fixedTag = LlmService.FIXED_AI_TAG;
+		const normalized = unique.filter(tag => tag !== fixedTag).slice(0, 5);
+		normalized.push(fixedTag);
+		return normalized;
 	}
 
 	private normalizeImagePlan(
@@ -341,30 +344,68 @@ export class LlmService {
 	}
 
 	private ensureCoverageBySource(content: XiaohongshuContentStructure, sourceMarkdown: string): XiaohongshuContentStructure {
+		const dedupedSubPoints = this.deduplicateSubPoints(content.subPoints);
 		const keyPoints = this.extractSourceKeyPoints(sourceMarkdown);
 		if (keyPoints.length === 0) {
-			return content;
+			return {
+				...content,
+				subPoints: dedupedSubPoints
+			};
 		}
 
-		const existingTexts = content.subPoints.map(item => `${item.title} ${item.argument} ${item.conclusion}`);
-		const additional = keyPoints
-			.filter(point => !this.isCoveredByExisting(point, existingTexts))
-			.map(point => ({
-				title: point.length > 16 ? point.slice(0, 16) : point,
-				argument: point.length >= 24
-					? point
-					: `围绕“${point}”补充场景、因果和行动建议，确保信息完整可执行。`,
-				conclusion: point.length >= 20 ? point.slice(0, 30) : `把“${point}”做实，形成稳定结果。`
-			}));
+		const existingTexts = [
+			content.title,
+			content.coreViewpoint,
+			content.noteText,
+			...dedupedSubPoints.map(item => `${item.title} ${item.argument} ${item.conclusion}`)
+		];
+		const supplementLimit = this.calculateSupplementLimit(dedupedSubPoints.length);
+		const additional: XiaohongshuContentStructure['subPoints'] = [];
+
+		for (const point of keyPoints) {
+			if (additional.length >= supplementLimit) {
+				break;
+			}
+
+			const normalizedPoint = this.normalizeSupplementPoint(point);
+			if (!normalizedPoint) {
+				continue;
+			}
+			if (!this.shouldSupplementPoint(normalizedPoint)) {
+				continue;
+			}
+			if (this.isCoveredByExisting(normalizedPoint, existingTexts)) {
+				continue;
+			}
+
+			additional.push({
+				title: this.buildSupplementTitle(normalizedPoint),
+				argument: normalizedPoint.length >= 24
+					? normalizedPoint
+					: `围绕“${normalizedPoint}”补充场景、因果和行动建议，确保信息完整可执行。`,
+				conclusion: normalizedPoint.length >= 20
+					? normalizedPoint.slice(0, 30)
+					: `把“${normalizedPoint}”做实，形成稳定结果。`
+			});
+			existingTexts.push(normalizedPoint);
+		}
 
 		if (additional.length === 0) {
-			return content;
+			return {
+				...content,
+				subPoints: dedupedSubPoints
+			};
 		}
 
 		return {
 			...content,
-			subPoints: [...content.subPoints, ...additional]
+			subPoints: this.deduplicateSubPoints([...dedupedSubPoints, ...additional])
 		};
+	}
+
+	private calculateSupplementLimit(existingCount: number): number {
+		const maxByCount = Math.max(5 - existingCount, 0);
+		return Math.min(maxByCount, 2);
 	}
 
 	private extractSourceKeyPoints(markdown: string): string[] {
@@ -384,42 +425,158 @@ export class LlmService {
 
 			const heading = text.match(/^#{1,6}\s+(.+)$/);
 			if (heading && heading[1]) {
-				points.push(this.normalizeKeyPoint(heading[1]));
+				const normalized = this.normalizeKeyPoint(heading[1]);
+				if (this.isValidKeyPoint(normalized)) {
+					points.push(normalized);
+				}
 				continue;
 			}
 
 			const bullet = text.match(/^[-*+]\s+(.+)$/);
 			if (bullet && bullet[1]) {
-				points.push(this.normalizeKeyPoint(bullet[1]));
+				const normalized = this.normalizeKeyPoint(bullet[1]);
+				if (this.isValidKeyPoint(normalized)) {
+					points.push(normalized);
+				}
 				continue;
 			}
 
 			const ordered = text.match(/^\d+[\.、\)]\s+(.+)$/);
 			if (ordered && ordered[1]) {
-				points.push(this.normalizeKeyPoint(ordered[1]));
+				const normalized = this.normalizeKeyPoint(ordered[1]);
+				if (this.isValidKeyPoint(normalized)) {
+					points.push(normalized);
+				}
+				continue;
+			}
+
+			const blockQuote = text.match(/^>+\s*(.+)$/);
+			if (blockQuote && blockQuote[1]) {
+				const normalized = this.normalizeKeyPoint(blockQuote[1]);
+				if (this.isValidKeyPoint(normalized)) {
+					points.push(normalized);
+				}
 			}
 		}
 
-		if (points.length === 0) {
-			const plain = cleanedMarkdown
-				.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-				.replace(/[`*_>#-]/g, ' ')
-				.replace(/\s+/g, ' ')
-				.trim();
-			const sentences = plain.split(/[。！？；\n]/).map(item => item.trim()).filter(item => item.length >= 12);
-			points.push(...sentences.slice(0, 8).map(item => this.normalizeKeyPoint(item)));
-		}
-
-		return Array.from(new Set(points.filter(Boolean))).slice(0, 16);
+		return Array.from(new Set(points.filter(Boolean))).slice(0, 12);
 	}
 
 	private normalizeKeyPoint(raw: string): string {
 		return raw
+			.replace(/<[^>]+>/g, ' ')
+			.replace(/&nbsp;/gi, ' ')
+			.replace(/&[a-z]+;/gi, ' ')
 			.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
 			.replace(/`+/g, '')
 			.replace(/\*+/g, '')
+			.replace(/^[>\s]+/, '')
 			.replace(/^[:：\-\s]+|[:：\-\s]+$/g, '')
+			.replace(/\s+/g, ' ')
 			.trim();
+	}
+
+	private isValidKeyPoint(text: string): boolean {
+		if (!text) {
+			return false;
+		}
+		if (text.length < 10) {
+			return false;
+		}
+		if (/https?:\/\//i.test(text)) {
+			return false;
+		}
+		if (/<[^>]*>/.test(text)) {
+			return false;
+		}
+		if (/style\s*=|class\s*=|<\/?mark/i.test(text)) {
+			return false;
+		}
+		const comparable = this.normalizeCompareText(text);
+		if (comparable.length < 8) {
+			return false;
+		}
+		return true;
+	}
+
+	private normalizeSupplementPoint(point: string): string {
+		const normalized = point.replace(/\s+/g, ' ').trim();
+		if (!normalized) {
+			return '';
+		}
+
+		if (normalized.length <= 80) {
+			return normalized;
+		}
+
+		const segments = normalized
+			.split(/[。！？；]/)
+			.map(item => item.trim())
+			.filter(item => item.length >= 10);
+
+		if (segments.length === 0) {
+			return normalized.slice(0, 80);
+		}
+
+		let combined = '';
+		for (const segment of segments) {
+			const candidate = combined ? `${combined}。${segment}` : segment;
+			if (candidate.length > 80 && combined) {
+				break;
+			}
+			combined = candidate;
+			if (combined.length >= 36) {
+				break;
+			}
+		}
+
+		return combined || normalized.slice(0, 80);
+	}
+
+	private shouldSupplementPoint(point: string): boolean {
+		if (point.length < 16) {
+			return false;
+		}
+		if (/[？?]$/.test(point)) {
+			return false;
+		}
+		if (/^(为什么|为何|怎么|如何)/.test(point)) {
+			return false;
+		}
+		return true;
+	}
+
+	private buildSupplementTitle(point: string): string {
+		const cleaned = point
+			.replace(/[“”"'‘’]/g, '')
+			.replace(/[。！？；:：]+$/g, '')
+			.trim();
+
+		const sentence = cleaned
+			.split(/[。！？；]/)
+			.map(item => item.trim())
+			.find(Boolean) || cleaned;
+
+		if (sentence.length <= 24) {
+			return sentence;
+		}
+
+		const clauses = sentence.split(/[，、,]/).map(item => item.trim()).filter(Boolean);
+		if (clauses.length > 1) {
+			let composed = '';
+			for (const clause of clauses) {
+				const next = composed ? `${composed}，${clause}` : clause;
+				if (next.length > 24 && composed) {
+					break;
+				}
+				composed = next;
+			}
+			if (composed.length >= 10) {
+				return composed;
+			}
+		}
+
+		return sentence.slice(0, 24);
 	}
 
 	private isCoveredByExisting(candidate: string, existingTexts: string[]): boolean {
@@ -437,7 +594,66 @@ export class LlmService {
 				return true;
 			}
 			const short = normalized.slice(0, Math.min(10, normalized.length));
-			return short.length >= 6 && base.includes(short);
+			if (short.length >= 6 && base.includes(short)) {
+				return true;
+			}
+
+			const normalizedBase = this.normalizeCompareText(base);
+			const normalizedCandidate = this.normalizeCompareText(normalized);
+			return this.isHighlySimilar(normalizedBase, normalizedCandidate);
 		});
+	}
+
+	private deduplicateSubPoints(points: XiaohongshuContentStructure['subPoints']): XiaohongshuContentStructure['subPoints'] {
+		const deduped: XiaohongshuContentStructure['subPoints'] = [];
+		for (const point of points) {
+			const text = `${point.title} ${point.argument} ${point.conclusion}`;
+			const normalized = this.normalizeCompareText(text);
+			const duplicated = deduped.some(existing => {
+				const existingText = `${existing.title} ${existing.argument} ${existing.conclusion}`;
+				return this.isHighlySimilar(this.normalizeCompareText(existingText), normalized);
+			});
+			if (!duplicated) {
+				deduped.push(point);
+			}
+		}
+		return deduped;
+	}
+
+	private normalizeCompareText(text: string): string {
+		return text
+			.toLowerCase()
+			.replace(/观点\s*\d+/g, '')
+			.replace(/[\s\p{P}\p{S}]+/gu, '')
+			.trim();
+	}
+
+	private isHighlySimilar(a: string, b: string): boolean {
+		if (!a || !b) {
+			return false;
+		}
+		if (a.includes(b) || b.includes(a)) {
+			return true;
+		}
+
+		const short = a.length <= b.length ? a : b;
+		const long = a.length <= b.length ? b : a;
+		if (short.length >= 8 && long.includes(short.slice(0, 8))) {
+			return true;
+		}
+
+		const aSet = new Set(a.split(''));
+		const bSet = new Set(b.split(''));
+		let overlap = 0;
+		for (const c of aSet) {
+			if (bSet.has(c)) {
+				overlap += 1;
+			}
+		}
+		const union = new Set([...aSet, ...bSet]).size;
+		if (union === 0) {
+			return false;
+		}
+		return overlap / union >= 0.72;
 	}
 }
