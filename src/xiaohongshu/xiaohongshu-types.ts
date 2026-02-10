@@ -41,7 +41,7 @@ export interface XiaohongshuContentStructure {
  */
 export interface ImagePlanItem {
 	slot: string;
-	type: 'cover' | 'viewpoint' | 'argument' | 'conclusion';
+	type: 'cover' | 'viewpoint' | 'argument' | 'conclusion' | 'recap';
 	/** 对应的内容索引 (subPoints的index，-1表示核心观点/cover) */
 	pointIndex: number;
 	/** 配图建议 */

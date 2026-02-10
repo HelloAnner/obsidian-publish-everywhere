@@ -7,13 +7,31 @@
  */
 
 export type XiaohongshuLayoutVariant =
+	// 古风/手写系列
 	| 'ink_handwriting'
 	| 'vintage_journal'
 	| 'minimal_paper'
 	| 'warm_notebook'
 	| 'zen_garden'
 	| 'night_reading'
-	| 'coffee_shop';
+	| 'coffee_shop'
+	// 现代多样化系列
+	| 'tech_minimal'
+	| 'nordic_fresh'
+	| 'vibrant_coral'
+	| 'premium_business'
+	| 'nature_wellness'
+	// 艺术风格系列
+	| 'morandi_gray'
+	| 'japanese_magazine'
+	| 'industrial_modern'
+	| 'watercolor_art'
+	// 技术风格系列
+	| 'terminal_cli'
+	| 'github_opensource'
+	| 'linear_saas'
+	| 'notion_docs'
+	| 'vscode_editor';
 
 /**
  * 风格预设接口
@@ -81,8 +99,25 @@ const HANDWRITING_FONTS = {
 };
 
 /**
+ * 现代字体栈 - 简约现代风格
+ * 优先级：系统UI字体 > 通用无衬线
+ */
+const MODERN_FONTS = {
+	// 标题用：几何无衬线
+	title: 'SF Pro Display, -apple-system, BlinkMacSystemFont, Inter, PingFang SC, Microsoft YaHei, sans-serif',
+	// 正文用：易读无衬线
+	body: 'SF Pro Text, -apple-system, BlinkMacSystemFont, Inter, PingFang SC, Microsoft YaHei, sans-serif',
+	// 装饰用：等宽或特殊
+	decorative: 'SF Mono, Menlo, Monaco, Consolas, PingFang SC, monospace'
+};
+
+/**
  * 风格预设列表
- * 7种精心设计的视觉风格，统一的JSON结构
+ * 21种精心设计的视觉风格，统一的JSON结构
+ * - 古风手写系列(7种)：墨韵、复古、极简、手账、禅意、夜读、咖啡
+ * - 现代多样化系列(5种)：科技、北欧、活力、商务、自然
+ * - 艺术风格系列(4种)：莫兰迪、日系、工业、水彩
+ * - 技术风格系列(5种)：终端、GitHub、Linear、Notion、VS Code
  */
 export const XIAOHONGSHU_STYLE_PRESETS: XiaohongshuStylePreset[] = [
 	{
@@ -245,6 +280,337 @@ export const XIAOHONGSHU_STYLE_PRESETS: XiaohongshuStylePreset[] = [
 		quoteStyle: 'western',
 		hasTexture: true,
 		borderRadius: 8
+	},
+
+	// ========== 现代多样化系列 ==========
+
+	{
+		// 风格8：科技极简风 - 现代科技感
+		id: 'tech-minimal',
+		name: '科技极简风',
+		layout: 'tech_minimal',
+		promptStyle: '像科技产品的说明书：简洁、理性、专业。用冷静的蓝灰色调，传达可信赖的专业内容。',
+		background: '#F8FAFC',
+		card: '#FFFFFF',
+		textPrimary: '#0F172A',
+		textSecondary: '#475569',
+		accent: '#3B82F6',
+		border: '#E2E8F0',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 8
+	},
+	{
+		// 风格9：北欧清新风 - 自然简约
+		id: 'nordic-fresh',
+		name: '���欧清新风',
+		layout: 'nordic_fresh',
+		promptStyle: '像北欧家居杂志：自然、温暖、舒适。用大地色系和留白，营造hygge式的阅读体验。',
+		background: '#F5F7F4',
+		card: '#FFFFFF',
+		textPrimary: '#2D3B36',
+		textSecondary: '#4A5B53',
+		accent: '#5A9A7A',
+		border: '#D4DDD8',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 70,
+		subtitleSize: 42,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'none',
+		hasTexture: false,
+		borderRadius: 12
+	},
+	{
+		// 风格10：活力渐变风 - 活泼有活力
+		id: 'vibrant-coral',
+		name: '活力渐变风',
+		layout: 'vibrant_coral',
+		promptStyle: '像小红书爆款笔记：活泼、有趣、正能量。用珊瑚粉和暖色调，传递积极向上的生活态度。',
+		background: '#FFF5F5',
+		card: '#FFFBFB',
+		textPrimary: '#1F2937',
+		textSecondary: '#4B5563',
+		accent: '#F43F5E',
+		border: '#FECDD3',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'none',
+		hasTexture: false,
+		borderRadius: 16
+	},
+	{
+		// 风格11：高端商务风 - 专业沉稳
+		id: 'premium-business',
+		name: '高端商务风',
+		layout: 'premium_business',
+		promptStyle: '像商业杂志的深度报道：专业、沉稳、有格调。深蓝配金色，彰显品质与洞察力。',
+		background: '#0F172A',
+		card: '#1E293B',
+		textPrimary: '#F8FAFC',
+		textSecondary: '#CBD5E1',
+		accent: '#D4AF37',
+		border: '#334155',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 70,
+		subtitleSize: 42,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'western',
+		hasTexture: false,
+		borderRadius: 4
+	},
+	{
+		// 风格12：清新自然风 - 舒适疗愈
+		id: 'nature-wellness',
+		name: '清新自然风',
+		layout: 'nature_wellness',
+		promptStyle: '像森林浴的体验：清新、舒适、疗愈。薄荷绿与大地色，让阅读成为一场心灵放松。',
+		background: '#F0FDF4',
+		card: '#FAFFFE',
+		textPrimary: '#14532D',
+		textSecondary: '#374151',
+		accent: '#10B981',
+		border: '#BBF7D0',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'none',
+		hasTexture: false,
+		borderRadius: 12
+	},
+
+	// ========== 艺术风格系列 ==========
+
+	{
+		// 风格13：莫兰迪色系 - 高级灰调
+		id: 'morandi-gray',
+		name: '莫兰迪色系',
+		layout: 'morandi_gray',
+		promptStyle: '像莫兰迪的静物画：高级、克制、有质感。用灰调和柔和的色彩，传达优雅从容的品味。',
+		background: '#E8E4E1',
+		card: '#F2EFEC',
+		textPrimary: '#4A4543',
+		textSecondary: '#7A7573',
+		accent: '#9B8B7A',
+		border: '#D5D0CB',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 6
+	},
+	{
+		// 风格14：日系杂志风 - 清新文艺
+		id: 'japanese-magazine',
+		name: '日系杂志风',
+		layout: 'japanese_magazine',
+		promptStyle: '像日本生活杂志：清新、文艺、治愈。用留白和简洁的排版，营造小确幸的阅读感受。',
+		background: '#FFFEF9',
+		card: '#FFFFFF',
+		textPrimary: '#2C2C2C',
+		textSecondary: '#6B6B6B',
+		accent: '#E8927C',
+		border: '#F0EBE3',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 66,
+		subtitleSize: 38,
+		bodySize: 30,
+		captionSize: 22,
+		quoteStyle: 'chinese',
+		hasTexture: false,
+		borderRadius: 0
+	},
+	{
+		// 风格15：工业风 - 硬朗现代
+		id: 'industrial-modern',
+		name: '工业风',
+		layout: 'industrial_modern',
+		promptStyle: '像工业设计展览：硬朗、现代、有力量。用深色和高对比，传达专业果断的态度。',
+		background: '#1A1A1A',
+		card: '#262626',
+		textPrimary: '#FFFFFF',
+		textSecondary: '#A3A3A3',
+		accent: '#F59E0B',
+		border: '#404040',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 72,
+		subtitleSize: 42,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 0
+	},
+	{
+		// 风格16：水彩风 - 柔和艺术
+		id: 'watercolor-art',
+		name: '水彩风',
+		layout: 'watercolor_art',
+		promptStyle: '像水彩画的留白：柔和、艺术、有意境。用淡雅的色彩和渐变，营造诗意的阅读氛围。',
+		background: '#F8FAFC',
+		card: '#FFFFFF',
+		textPrimary: '#334155',
+		textSecondary: '#64748B',
+		accent: '#06B6D4',
+		border: '#E0F2FE',
+		titleFont: HANDWRITING_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: HANDWRITING_FONTS.decorative,
+		titleSize: 70,
+		subtitleSize: 42,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'chinese',
+		hasTexture: true,
+		borderRadius: 16
+	},
+
+	// ========== 技术风格系列 ==========
+
+	{
+		// 风格17：终端风格 - 程序员极客范
+		id: 'terminal-cli',
+		name: '终端风格',
+		layout: 'terminal_cli',
+		promptStyle: '像黑客的终端界面：极客、硬核、专业。黑底绿字的经典风格，传递技术深度和专业性。',
+		background: '#0D1117',
+		card: '#161B22',
+		textPrimary: '#C9D1D9',
+		textSecondary: '#8B949E',
+		accent: '#3FB950',
+		border: '#30363D',
+		titleFont: MODERN_FONTS.decorative,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 8
+	},
+	{
+		// 风格18：GitHub风格 - 开源社区
+		id: 'github-opensource',
+		name: 'GitHub风格',
+		layout: 'github_opensource',
+		promptStyle: '像GitHub的README：专业、开放、可信赖。简洁明了的设计语言，传递开源协作精神。',
+		background: '#FFFFFF',
+		card: '#F6F8FA',
+		textPrimary: '#24292F',
+		textSecondary: '#57606A',
+		accent: '#0969DA',
+		border: '#D0D7DE',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 6
+	},
+	{
+		// 风格19：Linear风格 - 现代SaaS
+		id: 'linear-saas',
+		name: 'Linear风格',
+		layout: 'linear_saas',
+		promptStyle: '像Linear的产品界面：极简、精致、现代。黑白为主的高级感，传递专业产品力。',
+		background: '#000000',
+		card: '#18181B',
+		textPrimary: '#FAFAFA',
+		textSecondary: '#A1A1AA',
+		accent: '#5E5CE6',
+		border: '#27272A',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 70,
+		subtitleSize: 42,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'none',
+		hasTexture: false,
+		borderRadius: 12
+	},
+	{
+		// 风格20：Notion风格 - 文档工具
+		id: 'notion-docs',
+		name: 'Notion风格',
+		layout: 'notion_docs',
+		promptStyle: '像Notion的文档页面：清爽、专注、高效。让内容成为主角，传递知识管理的专业感。',
+		background: '#FFFFFF',
+		card: '#F7F6F3',
+		textPrimary: '#37352F',
+		textSecondary: '#787774',
+		accent: '#EB5757',
+		border: '#E3E2E0',
+		titleFont: MODERN_FONTS.title,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'none',
+		hasTexture: false,
+		borderRadius: 4
+	},
+	{
+		// 风格21：VS Code风格 - 代码编辑器
+		id: 'vscode-editor',
+		name: 'VS Code风格',
+		layout: 'vscode_editor',
+		promptStyle: '像VS Code的编辑器界面：开发者友好、专业护眼。深色主题配语法高亮色，传递编程美学。',
+		background: '#1E1E1E',
+		card: '#252526',
+		textPrimary: '#D4D4D4',
+		textSecondary: '#858585',
+		accent: '#569CD6',
+		border: '#3C3C3C',
+		titleFont: MODERN_FONTS.decorative,
+		bodyFont: MODERN_FONTS.body,
+		decorativeFont: MODERN_FONTS.decorative,
+		titleSize: 68,
+		subtitleSize: 40,
+		bodySize: 32,
+		captionSize: 24,
+		quoteStyle: 'line',
+		hasTexture: false,
+		borderRadius: 4
 	}
 ];
 
@@ -261,4 +627,27 @@ export function getXiaohongshuStyleBySeed(seed: number): XiaohongshuStylePreset 
  */
 export function getXiaohongshuStyleById(id: string): XiaohongshuStylePreset | undefined {
 	return XIAOHONGSHU_STYLE_PRESETS.find(style => style.id === id);
+}
+
+/**
+ * 随机获取一个风格预设
+ * 每次调用返回不同的随机风格
+ */
+export function getRandomXiaohongshuStyle(): XiaohongshuStylePreset {
+	const randomIndex = Math.floor(Math.random() * XIAOHONGSHU_STYLE_PRESETS.length);
+	return XIAOHONGSHU_STYLE_PRESETS[randomIndex];
+}
+
+/**
+ * 获取所有风格预设
+ */
+export function getAllXiaohongshuStyles(): XiaohongshuStylePreset[] {
+	return [...XIAOHONGSHU_STYLE_PRESETS];
+}
+
+/**
+ * 获取风格总数
+ */
+export function getXiaohongshuStyleCount(): number {
+	return XIAOHONGSHU_STYLE_PRESETS.length;
 }

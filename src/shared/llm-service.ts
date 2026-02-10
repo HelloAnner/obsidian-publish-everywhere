@@ -123,7 +123,10 @@ export class LlmService {
 		return [
 			'将以下素材提炼为面向外部读者的小红书图文内容，输出必须符合指定的JSON结构。',
 			'核心目标是对输入信息做无损覆盖：关键观点必须全部保留，可在此基础上适度扩充案例和解释。',
+			'原始笔记的内容与观点必须 100% 还原：不得遗漏任何关键观点，不得改变原观点立场，不得弱化原有判断。',
+			'生成前请先在内部完成“观点清单抽取”，再逐条映射到 subPoints，确保每条原始核心观点都被覆盖。',
 			'所有字段必须在给定字数内完整表达，不允许使用省略号“…”替代关键信息。',
+			'每个 subPoint 必须形成“标题→论据→结论”的闭环：论据是标题的详细补充，结论是精华收尾，不得各说各话。',
 			'',
 			`【指定风格】${stylePreset.name}`,
 			`【风格描述】${stylePreset.promptStyle}`,
@@ -140,8 +143,8 @@ export class LlmService {
 			'    "subPoints": [',
 			'      {',
 			'        "title": "子观点1标题，10-16字",',
-			'        "argument": "论据/详细说明，70-120字，深入分析原因、背景、案例，讲透彻",',
-			'        "conclusion": "结论/金句，18-30字，有洞察力和记忆点"',
+			'        "argument": "论据/详细说明，70-120字，必须紧扣标题展开：讲清原因、机制、场景或案例，不得偏题",',
+			'        "conclusion": "结论/金句，18-30字，提炼前文精华收尾，不引入新论点"',
 			'      }',
 			'      // 共3-4个子观点，每个观点都要有充实的论述',
 			'    ],',
@@ -167,12 +170,13 @@ export class LlmService {
 				'       * 开篇直接给核心结论（不要讲个人经历）',
 				'       * 中间按图文观点逐条解释依据与因果',
 				'       * 结尾给可执行建议或判断标准',
+				'       * 必须输出纯文本，不使用 Markdown 标记（如 #、*、-、>、```、[]()）',
 				'       * 用“直接结论+可执行建议”的表达，不使用“原笔记/本文/上文/作者在笔记里”等引用来源措辞',
 			'   - coreViewpoint: 一句话核心观点，要有洞察力，18-26字',
 			'   - subPoints: 3-4个子观点，每个包含：',
 			'       * 标题：明确表达观点立场',
-			'       * 论据：70-120字详细论述，可包含案例、对比、数据，但不要提及内容来源',
-			'       * 结论：18-30字金句收尾，有传播价值',
+			'       * 论据：70-120字详细论述，必须是对标题的补充和展开，讲清“为什么成立、如何落地”',
+			'       * 结论：18-30字精华收尾，压缩核心洞察，和标题/论据同向，不重复铺陈',
 			'   - hashtags: 4-6个标签，覆盖主题关键词',
 			'',
 			'2. imagePlan: 图片排版计划（按信息量动态扩展）',
@@ -184,12 +188,15 @@ export class LlmService {
 			'【内容要求 - 重要】',
 			'1. 标题优先：必须优先使用【优先标题】，仅允许轻微润色，不得另起完全不同的新标题',
 			'2. 信息无损：原素材中的关键观点必须全部体现在 subPoints 中，不得遗漏，可扩充但不能替换原意',
+			'2.1 观点还原强约束：原文出现的核心判断、因果关系、方法步骤必须逐条映射，不得合并丢失',
 			'3. 面向外部读者：直接输出结论与观点，不出现“原笔记提到/文中提到/作者写道”等来源指代',
 			'4. 层次分明：标题亮观点 → 论据讲透彻（案例/对比/引用） → 结论给金句',
-				'5. 文风要求：以观点阐述为主，不写故事化叙事，不使用“我今天/昨晚/一路走来”等经历口吻',
+			'5. 文风要求：以观点阐述为主，不写故事化叙事，不使用“我今天/昨晚/一路走来”等经历口吻',
 			'6. 可包含适量emoji增强可读性',
 			'7. 所有文字必须符合小红书平台的调性',
 			'8. 不允许出现“…”、“......”、“省略”这类未说完整的表达',
+			'10. subPoints 内部逻辑强约束：论据必须补充标题，结论必须收束标题与论据；若论据偏题或结论发散，视为不合格输出',
+			'11. 若原始观点数量较多，允许压缩措辞但不允许删观点；宁可增加 subPoints 密度，也不能牺牲覆盖率',
 			'',
 			'【可用附件图片】',
 			attachmentText,
@@ -232,15 +239,17 @@ export class LlmService {
 		const content: XiaohongshuContentStructure = {
 			title: this.normalizeTitle(rawContent?.title, defaultContent.title, noteTitle),
 			createdAt: this.safeString(rawContent?.createdAt, defaultContent.createdAt),
-			noteText: this.safeString(rawContent?.noteText, defaultContent.noteText),
+			noteText: this.normalizePlainText(this.safeString(rawContent?.noteText, defaultContent.noteText)),
 			coreViewpoint: this.safeString(rawContent?.coreViewpoint, defaultContent.coreViewpoint),
 			subPoints: this.normalizeSubPoints(rawContent?.subPoints, defaultContent.subPoints),
 			hashtags: this.normalizeTags(rawContent?.hashtags)
 		};
 
 		// 规范化imagePlan
+		// 说明：补全观点用于保证文案覆盖度，但图片只按原始去重后的观点数量生成，
+		// 避免尾部补充观点触发“最后几张重复描述”的体验问题。
 		const supplemented = this.ensureCoverageBySource(content, sourceMarkdown || '');
-		const imagePlan = this.normalizeImagePlan(raw?.imagePlan, supplemented.subPoints.length, attachmentNames);
+		const imagePlan = this.normalizeImagePlan(raw?.imagePlan, content.subPoints.length, attachmentNames);
 
 		return { content: supplemented, imagePlan };
 	}
@@ -248,6 +257,28 @@ export class LlmService {
 	private safeString(value: unknown, fallback: string): string {
 		const str = String(value || '').trim();
 		return str || fallback;
+	}
+
+	private normalizePlainText(value: string): string {
+		return value
+			.replace(/```[\s\S]*?```/g, ' ')
+			.replace(/`([^`]+)`/g, '$1')
+			.replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+			.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+			.replace(/^#{1,6}\s+/gm, '')
+			.replace(/^\s*[-*+]\s+/gm, '')
+			.replace(/^\s*\d+[\.、\)]\s+/gm, '')
+			.replace(/^>+\s?/gm, '')
+			.replace(/\*\*(.*?)\*\*/g, '$1')
+			.replace(/__(.*?)__/g, '$1')
+			.replace(/\*(.*?)\*/g, '$1')
+			.replace(/_(.*?)_/g, '$1')
+			.replace(/~~(.*?)~~/g, '$1')
+			.replace(/<[^>]+>/g, ' ')
+			.replace(/[ \t]+\n/g, '\n')
+			.replace(/\n{3,}/g, '\n\n')
+			.replace(/[ \t]{2,}/g, ' ')
+			.trim();
 	}
 
 	private normalizeTitle(rawTitle: unknown, fallback: string, noteTitle?: string): string {
@@ -306,20 +337,25 @@ export class LlmService {
 		subPointsCount: number,
 		attachmentNames: string[]
 	): ImagePlanItem[] {
-		const hasCover = !Array.isArray(rawPlan) || rawPlan.some((item: any) => this.normalizeImageType(item?.type) === 'cover');
+		// 始终使用标准化的图片计划，忽略LLM返回的imagePlan（避免重复和混乱）
 		const plan: ImagePlanItem[] = [];
 
-		if (hasCover) {
-			plan.push({ slot: 'card_1', type: 'cover', pointIndex: -1, attachmentHint: attachmentNames[0] || '' });
-		}
+		// 第1张：封面
+		plan.push({ slot: 'card_1', type: 'cover', pointIndex: -1, attachmentHint: attachmentNames[0] || '' });
 
+		// 第2张起：每个子观点一张图，确保不重复
+		const usedIndices = new Set<number>();
 		for (let i = 0; i < subPointsCount; i++) {
+			if (usedIndices.has(i)) {
+				continue;
+			}
 			plan.push({
 				slot: `card_${plan.length + 1}`,
 				type: 'viewpoint',
 				pointIndex: i,
 				attachmentHint: attachmentNames[i + 1] || attachmentNames[0] || ''
 			});
+			usedIndices.add(i);
 		}
 
 		return plan;
@@ -327,7 +363,7 @@ export class LlmService {
 
 	private normalizeImageType(type: unknown): ImagePlanItem['type'] {
 		const value = String(type || '').trim();
-		const validTypes: ImagePlanItem['type'][] = ['cover', 'viewpoint', 'argument', 'conclusion'];
+		const validTypes: ImagePlanItem['type'][] = ['cover', 'viewpoint', 'argument', 'conclusion', 'recap'];
 		if (validTypes.includes(value as ImagePlanItem['type'])) {
 			return value as ImagePlanItem['type'];
 		}
@@ -357,7 +393,12 @@ export class LlmService {
 			content.title,
 			content.coreViewpoint,
 			content.noteText,
-			...dedupedSubPoints.map(item => `${item.title} ${item.argument} ${item.conclusion}`)
+			...dedupedSubPoints.flatMap(item => [
+				item.title,
+				item.argument,
+				item.conclusion,
+				`${item.title} ${item.argument} ${item.conclusion}`
+			])
 		];
 		const supplementLimit = this.calculateSupplementLimit(dedupedSubPoints.length);
 		const additional: XiaohongshuContentStructure['subPoints'] = [];
@@ -623,6 +664,7 @@ export class LlmService {
 	private normalizeCompareText(text: string): string {
 		return text
 			.toLowerCase()
+			.replace(/^\s*[（(]?[0-9一二三四五六七八九十]+[）)]?\s*[.、\-—_:：]*/g, '')
 			.replace(/观点\s*\d+/g, '')
 			.replace(/[\s\p{P}\p{S}]+/gu, '')
 			.trim();

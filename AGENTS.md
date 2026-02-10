@@ -26,4 +26,4 @@ obsidian 标准插件源码仓库;
 
 ## 每一次修改后的验证步骤
 
-1. 执行 make package 
+1. 执行 make package 和 make install

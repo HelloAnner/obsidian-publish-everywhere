@@ -72,19 +72,21 @@ export class XiaohongshuImageRenderer {
 	}): string {
 		const { item } = params;
 
-		switch (item.type) {
-			case 'cover':
-				return this.buildCoverCard(params);
-			case 'viewpoint':
-				return this.buildViewpointCard(params);
-			case 'argument':
-				return this.buildArgumentCard(params);
-			case 'conclusion':
-				return this.buildConclusionCard(params);
-			default:
-				return this.buildViewpointCard(params);
+			switch (item.type) {
+				case 'cover':
+					return this.buildCoverCard(params);
+				case 'viewpoint':
+					return this.buildViewpointCard(params);
+				case 'argument':
+					return this.buildArgumentCard(params);
+				case 'conclusion':
+					return this.buildConclusionCard(params);
+				case 'recap':
+					return this.buildRecapCard(params);
+				default:
+					return this.buildViewpointCard(params);
+			}
 		}
-	}
 
 	/**
 	 * 封面卡片
@@ -366,6 +368,628 @@ export class XiaohongshuImageRenderer {
 	}
 
 	/**
+	 * 核心观点汇总卡片 - 重新设计的视觉层次布局
+	 */
+	private buildRecapCard(params: {
+		style: VisualStyle;
+		content: XiaohongshuContentStructure;
+		index: number;
+		total: number;
+	}): string {
+		const { style, content, index, total } = params;
+		const recapPoints = this.deduplicatePoints(content.subPoints);
+		const recapConfig = this.getRecapConfig(style, recapPoints.length);
+
+		// 构建汇总项 - 每行一个观点，包含序号、标题、金句
+		const itemsY = 320;
+		const itemHeight = recapConfig.itemHeight;
+		const itemSpacing = recapConfig.itemSpacing;
+
+		const itemSvgs: string[] = [];
+		for (let i = 0; i < recapPoints.length; i++) {
+			const y = itemsY + i * (itemHeight + itemSpacing);
+			itemSvgs.push(this.buildRecapItem({
+				style,
+				point: recapPoints[i],
+				index: i,
+				y,
+				config: recapConfig
+			}));
+		}
+
+		return `<?xml version="1.0" encoding="UTF-8"?>
+<svg width="1080" height="1440" viewBox="0 0 1080 1440" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    ${this.buildDefs(style, index)}
+    ${this.buildRecapGradient(style, index)}
+  </defs>
+
+  <!-- 背景 -->
+  ${this.buildBackground(style, index)}
+
+  <!-- 主卡片 -->
+  <rect x="60" y="60" width="960" height="1320" rx="${style.borderRadius}"
+        fill="${style.card}" filter="url(#shadow-${index})"
+        stroke="${style.border}" stroke-width="1"/>
+
+  <!-- 汇总头部 - 新的视觉设计 -->
+  ${this.buildRecapHeader(style, content, recapConfig)}
+
+  <!-- 观点列表 -->
+  ${itemSvgs.join('\n')}
+
+  <!-- 底部装饰线 -->
+  <line x1="120" y1="1260" x2="960" y2="1260" stroke="${style.border}" stroke-width="1" opacity="0.5"/>
+  <text x="540" y="1300" fill="${style.textSecondary}" font-size="22"
+        font-family="${style.decorativeFont}" text-anchor="middle" letter-spacing="3">
+    ${content.hashtags.slice(0, 4).join(' · ')}
+  </text>
+
+  <!-- 页码 -->
+  ${this.buildPageNumber(style, index, total)}
+</svg>`;
+	}
+
+	/**
+	 * 构建汇总卡片头部
+	 */
+	private buildRecapHeader(style: VisualStyle, content: XiaohongshuContentStructure, config: ReturnType<typeof XiaohongshuImageRenderer.prototype.getRecapConfig>): string {
+		const headerHeight = 200;
+		const accentBar = `
+  <!-- 左侧装饰条 -->
+  <rect x="60" y="60" width="8" height="${headerHeight}" rx="4" fill="${style.accent}"/>`;
+
+		return `${accentBar}
+
+  <!-- 主标题区 -->
+  <text x="120" y="140" fill="${style.accent}" font-size="${style.captionSize}"
+        font-family="${style.decorativeFont}" letter-spacing="3">${this.escapeXml(config.headerTag)}</text>
+  <text x="120" y="195" fill="${style.textPrimary}" font-size="${Math.max(style.subtitleSize, 40)}"
+        font-family="${style.titleFont}" font-weight="600">核心观点</text>
+
+  <!-- 核心金句区 -->
+  <rect x="450" y="85" width="510" height="145" rx="${style.borderRadius - 2}"
+        fill="${this.hexToRgba(style.accent, config.headerFillOpacity)}" stroke="${style.accent}" stroke-width="1.5" stroke-dasharray="6,3"/>
+  <text x="480" y="130" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}">核心洞察</text>
+  <text x="480" y="175" fill="${style.textPrimary}" font-size="26"
+        font-family="${style.bodyFont}" font-style="italic">${this.escapeXml(content.coreViewpoint.slice(0, 40))}${content.coreViewpoint.length > 40 ? '...' : ''}</text>`;
+	}
+
+	/**
+	 * 构建单个汇总项 - 两行布局避免重叠
+	 */
+	private buildRecapItem(params: {
+		style: VisualStyle;
+		point: { title: string; argument: string; conclusion: string };
+		index: number;
+		y: number;
+		config: ReturnType<typeof XiaohongshuImageRenderer.prototype.getRecapConfig>;
+	}): string {
+		const { style, point, index, y, config } = params;
+		const num = index + 1;
+
+		// 序号样式
+		const numX = 140;
+		const numY = y + config.itemHeight / 2;
+		const contentX = 200;
+		const contentWidth = 740;
+
+		// 处理标题和金句
+		const titleText = point.title.trim();
+		const conclusionText = point.conclusion.trim();
+
+		// 分区高度：上半区标题，下半区金句
+		const titleAreaTop = y + 6;
+		const titleAreaHeight = Math.floor(config.itemHeight / 2) - 2;
+		const conclusionAreaTop = y + Math.floor(config.itemHeight / 2) + 2;
+		const conclusionAreaHeight = config.itemHeight - (conclusionAreaTop - y) - 4;
+
+		// 标题自适应（第一行）
+		const titleLayout = this.fitTextToArea({
+			text: titleText,
+			textWidth: contentWidth - 60,
+			textHeight: titleAreaHeight,
+			initialFontSize: Math.max(style.bodySize - 2, 24),
+			minFontSize: 20,
+			charWidthFactor: 1.05
+		});
+
+		// 金句自适应（第二行，缩进）
+		const conclusionLayout = this.fitTextToArea({
+			text: conclusionText,
+			textWidth: contentWidth - 110,
+			textHeight: conclusionAreaHeight,
+			initialFontSize: Math.max(style.bodySize - 4, 22),
+			minFontSize: Math.max(config.minFontSize - 1, 16),
+			charWidthFactor: Math.max(config.charWidthFactor, 1.18)
+		});
+
+		// 根据风格选择不同的序号样式
+		const numBadge = this.buildNumBadge(style, num, numX, numY, config);
+
+		// 计算垂直位置（按文本块高度居中，避免换行时下溢）
+		const titleBlockHeight = titleLayout.fontSize + Math.max(titleLayout.lines.length - 1, 0) * titleLayout.lineHeight;
+		const conclusionBlockHeight = conclusionLayout.fontSize + Math.max(conclusionLayout.lines.length - 1, 0) * conclusionLayout.lineHeight;
+		const titleY = Math.round(
+			titleAreaTop
+			+ Math.max((titleAreaHeight - titleBlockHeight) / 2, 0)
+			+ titleLayout.fontSize
+		);
+		const conclusionY = Math.round(
+			conclusionAreaTop
+			+ Math.max((conclusionAreaHeight - conclusionBlockHeight) / 2, 0)
+			+ conclusionLayout.fontSize
+		);
+
+		return `
+  <!-- 背景条 - 斑马纹效果 -->
+  <rect x="120" y="${y}" width="840" height="${config.itemHeight}" rx="${config.itemRadius}"
+        fill="${index % 2 === 0 ? this.hexToRgba(style.accent, config.itemFillOpacity) : this.hexToRgba(style.accent, config.itemFillOpacity * 0.5)}"
+        ${config.itemStrokeDash ? `stroke="${style.border}" stroke-width="1" stroke-dasharray="${config.itemStrokeDash}"` : ''}/>
+
+  ${numBadge}
+
+  <!-- 标题 - 第一行 -->
+  <text x="${contentX}" y="${titleY}" fill="${style.textPrimary}" font-size="${titleLayout.fontSize}"
+        font-family="${style.titleFont}" font-weight="600">
+    ${titleLayout.lines.map((line, i) => `<tspan x="${contentX}" dy="${i === 0 ? 0 : titleLayout.lineHeight}">${this.escapeXml(line)}</tspan>`).join('\n    ')}
+  </text>
+
+  <!-- 金句 - 第二行，缩进 -->
+  <text x="${contentX + 24}" y="${conclusionY}" fill="${style.accent}" font-size="${conclusionLayout.fontSize}"
+        font-family="${style.bodyFont}" font-style="italic">
+    ${conclusionLayout.lines.map((line, i) => `<tspan x="${contentX + 24}" dy="${i === 0 ? 0 : conclusionLayout.lineHeight}">${this.escapeXml(line)}</tspan>`).join('\n    ')}
+  </text>`;
+	}
+
+	/**
+	 * 构建序号徽章 - 根据风格变化
+	 */
+	private buildNumBadge(style: VisualStyle, num: number, x: number, y: number, config: ReturnType<typeof XiaohongshuImageRenderer.prototype.getRecapConfig>): string {
+		switch (style.layout) {
+			case 'ink_handwriting':
+				return `
+  <!-- 中式印章风格 -->
+  <rect x="${x - 25}" y="${y - 28}" width="50" height="50" rx="4" fill="${this.hexToRgba(style.accent, 0.15)}" stroke="${style.accent}" stroke-width="2"/>
+  <text x="${x}" y="${y + 5}" fill="${style.accent}" font-size="28"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'vintage_journal':
+				return `
+  <!-- 复古标签风格 -->
+  <polygon points="${x - 22},${y - 25} ${x + 22},${y - 25} ${x + 22},${y + 15} ${x},${y + 25} ${x - 22},${y + 15}" fill="${style.accent}" fill-opacity="0.85"/>
+  <text x="${x}" y="${y + 2}" fill="${style.card}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'zen_garden':
+				return `
+  <!-- 禅意圆形 -->
+  <circle cx="${x}" cy="${y}" r="28" fill="none" stroke="${style.accent}" stroke-width="2"/>
+  <circle cx="${x}" cy="${y}" r="20" fill="${this.hexToRgba(style.accent, 0.1)}"/>
+  <text x="${x}" y="${y + 7}" fill="${style.accent}" font-size="24"
+        font-family="${style.decorativeFont}" font-weight="500" text-anchor="middle">${num}</text>`;
+
+			case 'night_reading':
+				return `
+  <!-- 夜间发光效果 -->
+  <circle cx="${x}" cy="${y}" r="26" fill="${this.hexToRgba(style.accent, 0.2)}" stroke="${style.accent}" stroke-width="1.5"/>
+  <text x="${x}" y="${y + 7}" fill="${style.accent}" font-size="24"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			// ========== 现代多样化系列 ==========
+			case 'tech_minimal':
+				return `
+  <!-- 科技极简 - 六边形 -->
+  <polygon points="${x},${y - 28} ${x + 24},${y - 14} ${x + 24},${y + 14} ${x},${y + 28} ${x - 24},${y + 14} ${x - 24},${y - 14}" fill="${style.accent}"/>
+  <text x="${x}" y="${y + 6}" fill="${style.card}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'nordic_fresh':
+				return `
+  <!-- 北欧清新 - 叶子形状 -->
+  <ellipse cx="${x}" cy="${y}" rx="28" ry="22" fill="${this.hexToRgba(style.accent, 0.15)}" stroke="${style.accent}" stroke-width="2"/>
+  <line x1="${x}" y1="${y - 22}" x2="${x}" y2="${y + 22}" stroke="${style.accent}" stroke-width="1"/>
+  <text x="${x}" y="${y + 6}" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'vibrant_coral':
+				return `
+  <!-- 活力渐变 - 圆角矩形带阴影 -->
+  <rect x="${x - 26}" y="${y - 26}" width="52" height="52" rx="16" fill="${style.accent}"/>
+  <circle cx="${x + 12}" cy="${y - 12}" r="6" fill="${this.hexToRgba('#FFFFFF', 0.3)}"/>
+  <text x="${x}" y="${y + 7}" fill="${style.card}" font-size="24"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'premium_business':
+				return `
+  <!-- 高端商务 - 金色边框 -->
+  <rect x="${x - 24}" y="${y - 24}" width="48" height="48" rx="4" fill="none" stroke="${style.accent}" stroke-width="2"/>
+  <rect x="${x - 18}" y="${y - 18}" width="36" height="36" rx="2" fill="${this.hexToRgba(style.accent, 0.12)}"/>
+  <text x="${x}" y="${y + 6}" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'nature_wellness':
+				return `
+  <!-- 清新自然 - 水滴形状 -->
+  <circle cx="${x}" cy="${y - 4}" r="26" fill="${this.hexToRgba(style.accent, 0.15)}" stroke="${style.accent}" stroke-width="2"/>
+  <circle cx="${x - 8}" cy="${y - 12}" r="4" fill="${this.hexToRgba(style.accent, 0.3)}"/>
+  <text x="${x}" y="${y + 5}" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			// ========== 艺术风格系列 ==========
+			case 'morandi_gray':
+				return `
+  <!-- 莫兰迪 - 柔和椭圆 -->
+  <ellipse cx="${x}" cy="${y}" rx="30" ry="24" fill="${this.hexToRgba(style.accent, 0.12)}" stroke="${style.accent}" stroke-width="1.5"/>
+  <text x="${x}" y="${y + 6}" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="500" text-anchor="middle">${num}</text>`;
+
+			case 'japanese_magazine':
+				return `
+  <!-- 日系杂志 - 日式图案 -->
+  <rect x="${x - 26}" y="${y - 20}" width="52" height="40" fill="${style.accent}"/>
+  <circle cx="${x}" cy="${y + 24}" r="8" fill="${this.hexToRgba(style.accent, 0.5)}"/>
+  <text x="${x}" y="${y + 6}" fill="${style.card}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'industrial_modern':
+				return `
+  <!-- 工业风 - 金属质感 -->
+  <rect x="${x - 24}" y="${y - 24}" width="48" height="48" fill="${this.hexToRgba(style.accent, 0.2)}" stroke="${style.accent}" stroke-width="3"/>
+  <line x1="${x - 24}" y1="${y + 8}" x2="${x + 24}" y2="${y + 8}" stroke="${style.accent}" stroke-width="1"/>
+  <text x="${x}" y="${y - 2}" fill="${style.accent}" font-size="20"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'watercolor_art':
+				return `
+  <!-- 水彩 - 晕染效果 -->
+  <circle cx="${x}" cy="${y}" r="28" fill="${this.hexToRgba(style.accent, 0.2)}"/>
+  <circle cx="${x - 6}" cy="${y - 6}" r="18" fill="${this.hexToRgba(style.accent, 0.15)}"/>
+  <text x="${x}" y="${y + 7}" fill="${style.accent}" font-size="24"
+        font-family="${style.decorativeFont}" font-weight="500" text-anchor="middle">${num}</text>`;
+
+			// ========== 技术风格系列 ==========
+			case 'terminal_cli':
+				return `
+  <!-- 终端 - 方括号样式 -->
+  <text x="${x - 20}" y="${y + 10}" fill="${style.accent}" font-size="36"
+        font-family="${style.decorativeFont}" font-weight="400">[</text>
+  <text x="${x + 20}" y="${y + 10}" fill="${style.accent}" font-size="36"
+        font-family="${style.decorativeFont}" font-weight="400">]</text>
+  <text x="${x}" y="${y + 5}" fill="${style.accent}" font-size="26"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'github_opensource':
+				return `
+  <!-- GitHub - 徽章样式 -->
+  <rect x="${x - 28}" y="${y - 16}" width="56" height="32" rx="16" fill="${style.accent}"/>
+  <text x="${x}" y="${y + 5}" fill="${style.card}" font-size="20"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'linear_saas':
+				return `
+  <!-- Linear - 极简圆角 -->
+  <rect x="${x - 22}" y="${y - 22}" width="44" height="44" rx="12" fill="${style.accent}" opacity="0.9"/>
+  <text x="${x}" y="${y + 6}" fill="${style.card}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="600" text-anchor="middle">${num}</text>`;
+
+			case 'notion_docs':
+				return `
+  <!-- Notion - 文档图标样式 -->
+  <rect x="${x - 20}" y="${y - 26}" width="40" height="52" rx="4" fill="${this.hexToRgba(style.accent, 0.1)}" stroke="${style.accent}" stroke-width="2"/>
+  <line x1="${x - 12}" y1="${y - 10}" x2="${x + 12}" y2="${y - 10}" stroke="${style.accent}" stroke-width="2"/>
+  <line x1="${x - 12}" y1="${y + 2}" x2="${x + 8}" y2="${y + 2}" stroke="${style.accent}" stroke-width="2"/>
+  <text x="${x}" y="${y + 22}" fill="${style.accent}" font-size="14"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+
+			case 'vscode_editor':
+				return `
+  <!-- VS Code - 代码行号样式 -->
+  <rect x="${x - 28}" y="${y - 18}" width="56" height="36" rx="4" fill="${this.hexToRgba(style.accent, 0.15)}"/>
+  <text x="${x}" y="${y + 6}" fill="${style.accent}" font-size="22"
+        font-family="${style.decorativeFont}" font-weight="500" text-anchor="middle">${num}</text>`;
+
+			default:
+				return `
+  <!-- 现代简约徽章 -->
+  <rect x="${x - 24}" y="${y - 24}" width="48" height="48" rx="${config.itemRadius}" fill="${style.accent}"/>
+  <text x="${x}" y="${y + 7}" fill="${style.card}" font-size="24"
+        font-family="${style.decorativeFont}" font-weight="700" text-anchor="middle">${num}</text>`;
+		}
+	}
+
+	/**
+	 * 构建汇总卡片渐变定义
+	 */
+	private buildRecapGradient(style: VisualStyle, index: number): string {
+		return `
+    <!-- 汇总卡片渐变 -->
+    <linearGradient id="recap-gradient-${index}" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="${style.accent}" stop-opacity="0.15"/>
+      <stop offset="100%" stop-color="${style.accent}" stop-opacity="0.05"/>
+    </linearGradient>`;
+	}
+
+	/**
+	 * 获取汇总卡片配置 - 适配新的横向列表布局
+	 */
+	private getRecapConfig(style: VisualStyle, pointCount: number): {
+		headerTag: string;
+		headerFillOpacity: number;
+		itemFillOpacity: number;
+		itemRadius: number;
+		itemStrokeDash?: string;
+		itemHeight: number;
+		itemSpacing: number;
+		minFontSize: number;
+		charWidthFactor: number;
+	} {
+		// 根据观点数量动态调整行高
+		const baseHeight = pointCount <= 3 ? 100 : pointCount <= 5 ? 85 : 70;
+		const baseSpacing = pointCount <= 3 ? 20 : pointCount <= 5 ? 14 : 10;
+
+		switch (style.layout) {
+			case 'ink_handwriting':
+				return {
+					headerTag: '墨韵总览',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 8,
+					itemStrokeDash: '4,2',
+					itemHeight: baseHeight + 10,
+					itemSpacing: baseSpacing,
+					minFontSize: 18,
+					charWidthFactor: 1.05
+				};
+			case 'vintage_journal':
+				return {
+					headerTag: '手记索引',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 6,
+					itemStrokeDash: '3,2',
+					itemHeight: baseHeight + 5,
+					itemSpacing: baseSpacing,
+					minFontSize: 18,
+					charWidthFactor: 1.04
+				};
+			case 'minimal_paper':
+				return {
+					headerTag: '重点清单',
+					headerFillOpacity: 0.08,
+					itemFillOpacity: 0.04,
+					itemRadius: 12,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'warm_notebook':
+				return {
+					headerTag: '行动重点',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 14,
+					itemHeight: baseHeight + 8,
+					itemSpacing: baseSpacing + 4,
+					minFontSize: 17,
+					charWidthFactor: 1.02
+				};
+			case 'zen_garden':
+				return {
+					headerTag: '禅意提纲',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 10,
+					itemStrokeDash: '2,3',
+					itemHeight: baseHeight + 5,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 1.03
+				};
+			case 'night_reading':
+				return {
+					headerTag: '夜读摘要',
+					headerFillOpacity: 0.2,
+					itemFillOpacity: 0.12,
+					itemRadius: 12,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 1.0
+				};
+			case 'coffee_shop':
+				return {
+					headerTag: '咖啡笔记',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 10,
+					itemHeight: baseHeight + 5,
+					itemSpacing: baseSpacing + 2,
+					minFontSize: 17,
+					charWidthFactor: 1.02
+				};
+
+			// ========== 现代多样化系列 ==========
+			case 'tech_minimal':
+				return {
+					headerTag: '技术要点',
+					headerFillOpacity: 0.1,
+					itemFillOpacity: 0.05,
+					itemRadius: 6,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'nordic_fresh':
+				return {
+					headerTag: '自然清单',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 14,
+					itemHeight: baseHeight + 5,
+					itemSpacing: baseSpacing + 2,
+					minFontSize: 17,
+					charWidthFactor: 1.02
+				};
+			case 'vibrant_coral':
+				return {
+					headerTag: '活力清单',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 16,
+					itemHeight: baseHeight + 8,
+					itemSpacing: baseSpacing + 4,
+					minFontSize: 17,
+					charWidthFactor: 1.02
+				};
+			case 'premium_business':
+				return {
+					headerTag: '核心摘要',
+					headerFillOpacity: 0.18,
+					itemFillOpacity: 0.1,
+					itemRadius: 4,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'nature_wellness':
+				return {
+					headerTag: '疗愈清单',
+					headerFillOpacity: 0.14,
+					itemFillOpacity: 0.07,
+					itemRadius: 14,
+					itemHeight: baseHeight + 5,
+					itemSpacing: baseSpacing + 2,
+					minFontSize: 17,
+					charWidthFactor: 1.02
+				};
+
+			// ========== 艺术风格系列 ==========
+			case 'morandi_gray':
+				return {
+					headerTag: '雅致清单',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 8,
+					itemStrokeDash: '4,3',
+					itemHeight: baseHeight + 3,
+					itemSpacing: baseSpacing + 1,
+					minFontSize: 17,
+					charWidthFactor: 1.01
+				};
+			case 'japanese_magazine':
+				return {
+					headerTag: '日杂清单',
+					headerFillOpacity: 0.1,
+					itemFillOpacity: 0.05,
+					itemRadius: 0,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 1.0
+				};
+			case 'industrial_modern':
+				return {
+					headerTag: '硬核要点',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 0,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'watercolor_art':
+				return {
+					headerTag: '水彩提纲',
+					headerFillOpacity: 0.14,
+					itemFillOpacity: 0.07,
+					itemRadius: 18,
+					itemHeight: baseHeight + 8,
+					itemSpacing: baseSpacing + 3,
+					minFontSize: 17,
+					charWidthFactor: 1.03
+				};
+
+			// ========== 技术风格系列 ==========
+			case 'terminal_cli':
+				return {
+					headerTag: '$ summary',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 4,
+					itemStrokeDash: '2,2',
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 16,
+					charWidthFactor: 0.95
+				};
+			case 'github_opensource':
+				return {
+					headerTag: 'README',
+					headerFillOpacity: 0.1,
+					itemFillOpacity: 0.05,
+					itemRadius: 6,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'linear_saas':
+				return {
+					headerTag: 'Summary',
+					headerFillOpacity: 0.15,
+					itemFillOpacity: 0.08,
+					itemRadius: 10,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 0.98
+				};
+			case 'notion_docs':
+				return {
+					headerTag: '要点汇总',
+					headerFillOpacity: 0.1,
+					itemFillOpacity: 0.05,
+					itemRadius: 4,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 1.0
+				};
+			case 'vscode_editor':
+				return {
+					headerTag: '// TODO',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 4,
+					itemStrokeDash: '3,2',
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 16,
+					charWidthFactor: 0.95
+				};
+
+			default:
+				return {
+					headerTag: '观点汇总',
+					headerFillOpacity: 0.12,
+					itemFillOpacity: 0.06,
+					itemRadius: 10,
+					itemHeight: baseHeight,
+					itemSpacing: baseSpacing,
+					minFontSize: 17,
+					charWidthFactor: 1.0
+				};
+		}
+	}
+
+
+	/**
 	 * 构建SVG定义
 	 */
 	private buildDefs(style: VisualStyle, index: number): string {
@@ -436,10 +1060,14 @@ export class XiaohongshuImageRenderer {
 		switch (item.type) {
 			case 'cover':
 				return content.title;
+			case 'recap':
+				return '核心观点汇总';
 			case 'viewpoint':
 			case 'argument':
 			case 'conclusion':
-				return item.titleOverride || content.subPoints[item.pointIndex]?.title || content.coreViewpoint;
+				return item.titleOverride !== undefined
+					? item.titleOverride
+					: (content.subPoints[item.pointIndex]?.title || content.coreViewpoint);
 			default:
 				return content.title;
 		}
@@ -454,6 +1082,10 @@ export class XiaohongshuImageRenderer {
 		const source = imagePlan.length > 0 ? imagePlan : this.buildFallbackPlan(dedupedContent.subPoints.length);
 
 		for (const item of source) {
+			if (item.type === 'recap') {
+				continue;
+			}
+
 			if (item.type === 'viewpoint' || item.type === 'argument' || item.type === 'conclusion') {
 				expanded.push(...this.expandPointItem(item, dedupedContent));
 				continue;
@@ -462,61 +1094,54 @@ export class XiaohongshuImageRenderer {
 			expanded.push(item);
 		}
 
-		return expanded.map((item, index) => ({ ...item, slot: `card_${index + 1}` }));
+		const unique = this.deduplicateExpandedItems(expanded);
+		return unique.map((item, index) => ({ ...item, slot: `card_${index + 1}` }));
 	}
 
+	private deduplicateExpandedItems(items: ImagePlanItem[]): ImagePlanItem[] {
+		const unique: ImagePlanItem[] = [];
+		const fingerprints = new Set<string>();
+		for (const item of items) {
+			const key = this.buildItemFingerprint(item);
+			if (fingerprints.has(key)) {
+				continue;
+			}
+			fingerprints.add(key);
+			unique.push(item);
+		}
+		return unique;
+	}
+
+	private buildItemFingerprint(item: ImagePlanItem): string {
+		return [
+			item.type,
+			item.pointIndex,
+			(item.titleOverride || '').trim(),
+			(item.argumentOverride || '').trim(),
+			(item.conclusionOverride || '').trim(),
+			item.segmentIndex || 0,
+			item.segmentTotal || 0
+		].join('|');
+	}
+
+	/**
+	 * 扩展观点项 - 每个观点只生成一张图，取消自动分页
+	 */
 	private expandPointItem(item: ImagePlanItem, content: XiaohongshuContentStructure): ImagePlanItem[] {
 		const point = content.subPoints[item.pointIndex];
 		if (!point) {
 			return [];
 		}
 
-		const argumentSegments = this.splitByVisualCapacity(point.argument, 760, 250, 18, 1.02);
-		const conclusionSegments = this.splitByVisualCapacity(point.conclusion, 720, 145, 20, 1.05);
-		const segmentTotal = Math.max(argumentSegments.length, 1);
-		const hasIndependentConclusionPages = conclusionSegments.length > 1;
-		const results: ImagePlanItem[] = [];
-
-		for (let i = 0; i < segmentTotal; i++) {
-			const argumentText = argumentSegments[i] || argumentSegments[argumentSegments.length - 1] || point.argument;
-			const conclusionText = this.pickSegmentConclusion(
-				conclusionSegments,
-				hasIndependentConclusionPages,
-				i,
-				point.conclusion
-			);
-			results.push({
-				...item,
-				titleOverride: segmentTotal > 1 ? `${point.title}（${i + 1}/${segmentTotal}）` : point.title,
-				argumentOverride: argumentText,
-				conclusionOverride: conclusionText,
-				segmentIndex: i + 1,
-				segmentTotal
-			});
-		}
-
-		return results;
-	}
-
-	private pickSegmentConclusion(
-		conclusionSegments: string[],
-		hasIndependentConclusionPages: boolean,
-		segmentIndex: number,
-		fallback: string
-	): string {
-		if (conclusionSegments.length === 0) {
-			return fallback;
-		}
-
-		if (hasIndependentConclusionPages) {
-			return conclusionSegments[segmentIndex] || conclusionSegments[conclusionSegments.length - 1] || fallback;
-		}
-
-		if (segmentIndex === 0) {
-			return conclusionSegments[0] || fallback;
-		}
-
-		return '';
+		// 每个观点只生成一张图，不再根据文字长度分页
+		return [{
+			...item,
+			titleOverride: point.title,
+			argumentOverride: point.argument,
+			conclusionOverride: point.conclusion,
+			segmentIndex: 1,
+			segmentTotal: 1
+		}];
 	}
 
 	private buildFallbackPlan(subPointsCount: number): ImagePlanItem[] {
@@ -525,34 +1150,6 @@ export class XiaohongshuImageRenderer {
 			plan.push({ slot: `card_${plan.length + 1}`, type: 'viewpoint', pointIndex: i });
 		}
 		return plan;
-	}
-
-	private splitByVisualCapacity(
-		text: string,
-		textWidth: number,
-		textHeight: number,
-		minFontSize: number,
-		charWidthFactor: number
-	): string[] {
-		const normalized = String(text || '').replace(/\r\n/g, '\n').trim();
-		if (!normalized) {
-			return [''];
-		}
-
-		const fontSize = minFontSize;
-		const lineHeight = fontSize * 1.45;
-		const linesPerPage = Math.max(Math.floor((textHeight - fontSize) / lineHeight) + 1, 2);
-		const maxChars = this.estimateCharsPerLine(textWidth, fontSize, charWidthFactor);
-		const lines = this.wrapTextLines(normalized, maxChars, 0);
-		if (lines.length <= linesPerPage) {
-			return [normalized];
-		}
-
-		const segments: string[] = [];
-		for (let i = 0; i < lines.length; i += linesPerPage) {
-			segments.push(lines.slice(i, i + linesPerPage).join(''));
-		}
-		return segments;
 	}
 
 	private deduplicatePoints(points: XiaohongshuContentStructure['subPoints']): XiaohongshuContentStructure['subPoints'] {
