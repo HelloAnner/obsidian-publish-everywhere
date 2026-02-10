@@ -12,6 +12,7 @@ import { ConfluenceClient } from './src/confluence/confluence-client';
 import { ConfluencePublisher } from './src/confluence/confluence-publisher';
 import { replaceBareKmsLinks, replaceWikiLinksWithKmsUrl } from './src/confluence/kms-link-utils';
 import { GitHubPublisher } from './src/github/github-publisher';
+import { XiaohongshuPublisher } from './src/xiaohongshu/xiaohongshu-publisher';
 
 interface ConfluencePublisherSettings {
 	confluenceUrl: string;
@@ -133,6 +134,21 @@ export default class PublishEverywherePlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: 'publish-to-xiaohongshu',
+			name: '发布到小红书',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+						this.enqueuePlatformPublish('xiaohongshu', markdownView);
+					}
+					return true;
+				}
+				return false;
+			}
+		});
+
+		this.addCommand({
 			id: 'publish-to-all-platforms',
 			name: '🚀 一键发布到所有平台',
 			checkCallback: (checking: boolean) => {
@@ -178,11 +194,17 @@ export default class PublishEverywherePlugin extends Plugin {
 		// 保留一个一键发布命令（已移除重复的“含Notion”命令）
 	}
 
-	private enqueuePlatformPublish(type: 'feishu' | 'confluence' | 'notion' | 'github', view: MarkdownView): void {
-		this.publishQueue.add({
+	private enqueuePlatformPublish(type: 'feishu' | 'confluence' | 'notion' | 'github' | 'xiaohongshu', view: MarkdownView): void {
+		const filePath = view.file?.path;
+		const added = this.publishQueue.add({
 			type,
-			view
+			view,
+			filePath
 		});
+		if (!added) {
+			new Notice('⏳ 相同任务已在队列中，等待顺序执行...');
+			return;
+		}
 
 		const queueStatus = this.publishQueue.getStatus();
 		if (this.publishQueue.processing) {
@@ -668,6 +690,62 @@ export default class PublishEverywherePlugin extends Plugin {
 		}
 	}
 
+	private async publishCurrentNoteToXiaohongshu(view: MarkdownView): Promise<void> {
+		const file = this.requireActiveMarkdownFile(view);
+		if (!file) {
+			return;
+		}
+
+		try {
+			new Notice('⏳ 正在准备小红书素材...');
+			await this.ensureFileSaved(file);
+			const rawContent = await this.app.vault.read(file);
+			const vaultPath = (this.app.vault.adapter as any).basePath;
+			const publisher = new XiaohongshuPublisher({
+				app: this.app,
+				settings: this.settings,
+				vaultBasePath: vaultPath
+			});
+
+			const reportProgress = (message: string): void => {
+				this.log(`[Xiaohongshu] ${message}`);
+			};
+			const result = await publisher.prepareMaterials(file, rawContent, reportProgress);
+			if (result.draft?.styleSeed !== undefined) {
+				this.settings.xiaohongshuLastStyleSeed = result.draft.styleSeed;
+				await this.saveSettings();
+			}
+			if (result.success && result.outputDir) {
+				await this.updateXiaohongshuFrontMatter(file);
+				// 显示带"打开文件夹"按钮的通知
+				const fragment = document.createDocumentFragment();
+				fragment.createEl('div', { text: '✅ 小红书素材准备完成' });
+				const btn = fragment.createEl('button', { text: '📂 打开文件夹', cls: 'mod-cta' });
+				btn.style.marginTop = '8px';
+				btn.onclick = () => {
+					const { shell } = require('electron');
+					shell.openPath(result.outputDir as string);
+				};
+				new Notice(fragment, 10000);
+				return;
+			}
+
+			const reason = result.error || '未知错误';
+			new Notice(`❌ 小红书素材准备失败：${reason}`, 9000);
+			this.log(`[Xiaohongshu] failed: ${reason}`, 'warn');
+		} catch (error) {
+			const message = (error as Error).message || '素材准备失败';
+			new Notice(`❌ 小红书素材准备失败：${message}`, 9000);
+			this.log(`[Xiaohongshu] Failed: ${message}`, 'error');
+		}
+	}
+
+	private async updateXiaohongshuFrontMatter(file: TFile): Promise<void> {
+		await this.app.fileManager.processFrontMatter(file, (fm) => {
+			(fm as any)['小红书'] = true;
+		});
+	}
+
 	private resolveConfluencePublishContext(view: MarkdownView): {
 		file: TFile;
 		parentId: string;
@@ -1106,10 +1184,17 @@ export default class PublishEverywherePlugin extends Plugin {
 		this.log(`Adding file share to queue: ${file.path}`);
 
 		// 添加到队列
-		this.publishQueue.add({
+		const added = this.publishQueue.add({
 			type: 'feishu',
-			file: file
+			file: file,
+			filePath: file.path
 		});
+		if (!added) {
+			if (!this.settings.suppressShareNotices) {
+				new Notice('⏳ 当前笔记的飞书发布任务已在队列中...');
+			}
+			return;
+		}
 
 		// 显示排队状态
 		if (!this.settings.suppressShareNotices) {
@@ -1462,10 +1547,15 @@ export default class PublishEverywherePlugin extends Plugin {
 		this.log('Adding publish to all platforms to queue');
 
 		// 添加到队列
-		this.publishQueue.add({
+		const added = this.publishQueue.add({
 			type: 'all',
-			view: activeView
+			view: activeView,
+			filePath: activeView.file?.path
 		});
+		if (!added) {
+			new Notice('⏳ 当前笔记的一键发布任务已在队列中...');
+			return;
+		}
 
 		// 显示排队状态
 		const queueStatus = this.publishQueue.getStatus();
@@ -1501,9 +1591,10 @@ export default class PublishEverywherePlugin extends Plugin {
 		if (frontmatter.feishu) platforms.push('飞书');
 		if (frontmatter.notion || frontmatter.notion_url) platforms.push('Notion');
 		if (frontmatter.github) platforms.push('GitHub');
+		platforms.push('小红书');
 
 		if (platforms.length === 0) {
-			new Notice('❌ 当前笔记没有配置任何发布平台（kms / feishu / notion / github）');
+			new Notice('❌ 当前笔记没有配置任何发布平台（kms / feishu / notion / github / xiaohongshu）');
 			return;
 		}
 
@@ -1587,6 +1678,21 @@ export default class PublishEverywherePlugin extends Plugin {
 			if (platforms.length > 1) {
 				await new Promise(resolve => setTimeout(resolve, 1000));
 			}
+		}
+
+		try {
+			this.log('Publishing to Xiaohongshu...');
+			await this.publishCurrentNoteToXiaohongshu(view);
+			results.push({ platform: '小红书', success: true });
+			new Notice('✅ 小红书发布流程已执行', 2000);
+		} catch (error) {
+			results.push({ platform: '小红书', success: false, error: (error as Error).message });
+			this.log(`小红书 发布失败: ${(error as Error).message}`, 'error');
+			new Notice(`❌ 小红书 发布失败: ${(error as Error).message}`, 4000);
+		}
+
+		if (platforms.length > 1) {
+			await new Promise(resolve => setTimeout(resolve, 1000));
 		}
 
 		// 显示结果总结
@@ -1684,37 +1790,65 @@ export default class PublishEverywherePlugin extends Plugin {
 	 */
 	private async executePublishTask(task: PublishTask): Promise<void> {
 		try {
+			const effectiveView = this.resolveTaskView(task);
 			switch (task.type) {
 				case 'feishu':
-					if (task.view) {
-                        await this.publishCurrentNoteToFeishu(task.view);
+					if (effectiveView) {
+						await this.publishCurrentNoteToFeishu(effectiveView);
 					} else if (task.file) {
 						await this.shareFileInternal(task.file);
 					}
 					break;
 				case 'confluence':
-					if (task.view) {
-                        await this.publishCurrentNoteToConfluence(task.view);
+					if (effectiveView) {
+						await this.publishCurrentNoteToConfluence(effectiveView);
 					}
 					break;
 				case 'notion':
-					if (task.view) {
-						await this.publishCurrentNoteToNotion(task.view);
+					if (effectiveView) {
+						await this.publishCurrentNoteToNotion(effectiveView);
 					}
 					break;
 				case 'github':
-					if (task.view) {
-						await this.publishCurrentNoteToGitHub(task.view);
+					if (effectiveView) {
+						await this.publishCurrentNoteToGitHub(effectiveView);
+					}
+					break;
+				case 'xiaohongshu':
+					if (effectiveView) {
+						await this.publishCurrentNoteToXiaohongshu(effectiveView);
 					}
 					break;
 				case 'all':
-					if (task.view) {
-						await this.publishToAllPlatformsInternal(task.view);
+					if (effectiveView) {
+						await this.publishToAllPlatformsInternal(effectiveView);
 					}
 					break;
 			}
 		} catch (error) {
 			this.log(`发布任务执行失败: ${error.message}`, 'error');
 		}
+	}
+
+	private resolveTaskView(task: PublishTask): MarkdownView | null {
+		if (task.filePath) {
+			const viewByPath = this.app.workspace.getLeavesOfType('markdown')
+				.map(leaf => leaf.view)
+				.find(view => view instanceof MarkdownView && view.file?.path === task.filePath);
+			if (viewByPath && viewByPath instanceof MarkdownView) {
+				return viewByPath;
+			}
+		}
+
+		if (task.view?.file && (!task.filePath || task.view.file.path === task.filePath)) {
+			return task.view;
+		}
+
+		const active = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (active && (!task.filePath || active.file?.path === task.filePath)) {
+			return active;
+		}
+
+		return null;
 	}
 }

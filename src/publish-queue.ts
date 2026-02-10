@@ -4,9 +4,10 @@ import { Notice, TFile, MarkdownView } from 'obsidian';
  * 发布任务类型
  */
 export interface PublishTask {
-	type: 'feishu' | 'confluence' | 'notion' | 'github' | 'all';
+	type: 'feishu' | 'confluence' | 'notion' | 'github' | 'xiaohongshu' | 'all';
 	file?: TFile;
 	view?: MarkdownView;
+	filePath?: string;
 }
 
 /**
@@ -16,13 +17,24 @@ export interface PublishTask {
 export class PublishQueue {
 	private queue: PublishTask[] = [];
 	private isProcessing = false;
+	private queuedTaskKeys: Set<string> = new Set();
+	private processingTaskKey: string | null = null;
 
 	/**
 	 * 添加任务到队列
 	 */
-	add(task: PublishTask): void {
+	add(task: PublishTask): boolean {
+		const taskKey = this.buildTaskKey(task);
+		if (taskKey && (this.queuedTaskKeys.has(taskKey) || this.processingTaskKey === taskKey)) {
+			return false;
+		}
+
+		if (taskKey) {
+			this.queuedTaskKeys.add(taskKey);
+		}
 		this.queue.push(task);
 		this.processNext();
+		return true;
 	}
 
 	/**
@@ -43,6 +55,11 @@ export class PublishQueue {
 			this.isProcessing = false;
 			return;
 		}
+		const taskKey = this.buildTaskKey(task);
+		if (taskKey) {
+			this.queuedTaskKeys.delete(taskKey);
+			this.processingTaskKey = taskKey;
+		}
 
 		try {
 			// 执行任务（由外部传入的实际执行函数）
@@ -50,6 +67,7 @@ export class PublishQueue {
 		} catch (error) {
 			console.error('发布任务执行失败:', error);
 		} finally {
+			this.processingTaskKey = null;
 			// 标记为处理完成
 			this.isProcessing = false;
 
@@ -75,6 +93,7 @@ export class PublishQueue {
 	 */
 	clear(): void {
 		this.queue = [];
+		this.queuedTaskKeys.clear();
 	}
 
 	/**
@@ -103,6 +122,14 @@ export class PublishQueue {
 			return `排队中（共 ${this.queue.length} 个任务）`;
 		}
 		return '就绪';
+	}
+
+	private buildTaskKey(task: PublishTask): string | null {
+		const path = task.filePath || task.file?.path || '';
+		if (!path) {
+			return null;
+		}
+		return `${task.type}:${path}`;
 	}
 }
 

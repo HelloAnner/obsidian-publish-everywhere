@@ -59,6 +59,10 @@ export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
 	suppressShareNotices: false,
 	// 新增：简洁成功通知（默认关闭，使用带按钮的富通知）
 	simpleSuccessNotice: false,
+	llmBaseUrl: '',
+	llmModel: '',
+	llmApiKey: '',
+	xiaohongshuLastStyleSeed: -1,
 };
 
 export const FEISHU_ERROR_MESSAGES: Record<number, string> = {

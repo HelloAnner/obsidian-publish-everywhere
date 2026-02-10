@@ -69,7 +69,7 @@ export interface WikiNode {
 	owner?: string;
 }
 
-export interface FeishuSettings {
+export interface FeishuSettings extends AutomationSharedSettings {
 	appId: string;
 	appSecret: string;
 	callbackUrl: string;
@@ -101,6 +101,16 @@ export interface FeishuSettings {
 	suppressShareNotices: boolean;
 	// 新增：简洁成功通知（仅一行提示）
 	simpleSuccessNotice: boolean;
+}
+
+/**
+ * 自动化公共设置（LLM 服务）
+ */
+export interface AutomationSharedSettings {
+	llmBaseUrl: string;
+	llmModel: string;
+	llmApiKey: string;
+	xiaohongshuLastStyleSeed: number;
 }
 
 export interface FeishuUserInfo {

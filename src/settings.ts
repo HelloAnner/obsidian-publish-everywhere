@@ -144,11 +144,19 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 
 		}
 
-        // Notion 设置部分
-        containerEl.createEl('hr');
-        containerEl.createEl('h2', { text: 'Notion 发布设置' });
-        this.renderNotionSettings(containerEl);
-    }
+		// Notion 设置部分
+		containerEl.createEl('hr');
+		containerEl.createEl('h2', { text: 'Notion 发布设置' });
+		this.renderNotionSettings(containerEl);
+
+		containerEl.createEl('hr');
+		containerEl.createEl('h2', { text: 'LLM 设置' });
+		this.renderAutomationSharedSettings(containerEl);
+
+		containerEl.createEl('hr');
+		containerEl.createEl('h2', { text: '小红书发布设置' });
+		this.renderXiaohongshuSettings(containerEl);
+	}
 
     private renderConfluenceSettings(containerEl: HTMLElement) {
         // Confluence 基本配置
@@ -199,7 +207,7 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
                 }));
     }
 
-    private renderNotionSettings(containerEl: HTMLElement) {
+	private renderNotionSettings(containerEl: HTMLElement) {
         const desc = containerEl.createDiv('setting-item-description');
         desc.createEl('p', { text: '只需配置 Notion API Token。' });
 
@@ -244,6 +252,49 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 			const statusSpan = statusDesc.createEl('span', { text: '❌ 未配置' });
 			statusSpan.addClass('mod-warning');
 		}
+	}
+
+	private renderAutomationSharedSettings(containerEl: HTMLElement): void {
+		new Setting(containerEl)
+			.setName('LLM URL')
+			.setDesc('大模型基础地址，例如 https://api.openai.com/v1')
+			.addText(text => text
+				.setPlaceholder('https://api.example.com/v1')
+				.setValue(this.plugin.settings.llmBaseUrl || '')
+				.onChange(async (value) => {
+					this.plugin.settings.llmBaseUrl = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('LLM Model')
+			.setDesc('用于小红书文案和图文排版规划的模型名')
+			.addText(text => text
+				.setPlaceholder('gpt-4.1-mini')
+				.setValue(this.plugin.settings.llmModel || '')
+				.onChange(async (value) => {
+					this.plugin.settings.llmModel = value.trim();
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('LLM API Key')
+			.setDesc('调用大模型的鉴权 Token')
+			.addText(text => {
+				text.setPlaceholder('sk-...')
+					.setValue(this.plugin.settings.llmApiKey || '')
+					.onChange(async (value) => {
+						this.plugin.settings.llmApiKey = value.trim();
+						await this.plugin.saveSettings();
+					});
+				text.inputEl.type = 'password';
+			});
+	}
+
+	private renderXiaohongshuSettings(containerEl: HTMLElement): void {
+		const tip = containerEl.createDiv('setting-item-description');
+		tip.createEl('p', { text: '触发规则：执行“发布到小红书”命令即直接发布到当前账号（无需 Front Matter 属性）。' });
+		tip.createEl('p', { text: '风格策略：从你提供的样例风格中随机选一个，并把该风格描述拼接进 LLM 提示词。' });
 	}
 
 	private async testNotionConnection() {
