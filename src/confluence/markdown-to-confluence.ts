@@ -87,11 +87,13 @@ function preprocessUrls(content: string): string {
 function preProcessMermaid(content: string): string {
 	const re = /```mermaid\s*\n([\s\S]*?)```/g;
 	return content.replace(re, (_match: string, mermaidContent: string) => {
-		return `MERMAID_PLACEHOLDER:${mermaidContent}:MERMAID_PLACEHOLDER`;
+		const encoded = encodeURIComponent(mermaidContent.trim());
+		return `<img src="obsidian-mermaid://${encoded}" alt="mermaid" />`;
 	});
 }
 
 function postProcessMermaid(content: string): string {
+	// 兼容历史版本：若正文中仍存在旧占位符，继续按 markdown 宏输出
 	const re = /MERMAID_PLACEHOLDER:([\s\S]*?):MERMAID_PLACEHOLDER/g;
 	return content.replace(re, (_match: string, mermaidContent: string) => {
 		const escaped = escapeCDATA(mermaidContent);

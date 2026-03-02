@@ -1,9 +1,11 @@
 import * as path from 'path';
 import * as fs from 'fs';
+import { createHash } from 'crypto';
 import { App, TFile } from 'obsidian';
 import * as mime from 'mime-types';
 import { ConfluenceClient } from './confluence-client';
 import { ExcalidrawExporter } from './excalidraw-exporter';
+import { MermaidRenderer } from './mermaid-renderer';
 
 export class ConfluenceImageHandler {
 	private readonly app: App;
@@ -12,6 +14,7 @@ export class ConfluenceImageHandler {
 	private readonly vaultBasePath: string;
 	private readonly uploaded: Map<string, string> = new Map();
 	private readonly excalidrawExporter: ExcalidrawExporter;
+	private readonly mermaidRenderer: MermaidRenderer;
 
 	constructor(params: { app: App; client: ConfluenceClient; sourceFile: TFile; vaultBasePath: string }) {
 		this.app = params.app;
@@ -19,6 +22,7 @@ export class ConfluenceImageHandler {
 		this.sourceFile = params.sourceFile;
 		this.vaultBasePath = params.vaultBasePath;
 		this.excalidrawExporter = new ExcalidrawExporter(this.app);
+		this.mermaidRenderer = new MermaidRenderer();
 	}
 
 	async processImages(content: string, pageId: string): Promise<string> {
@@ -59,6 +63,10 @@ export class ConfluenceImageHandler {
 	}
 
 	private async processImageReference(imagePath: string, _altText: string, pageId: string, displayWidth?: number): Promise<string> {
+		if (this.isMermaidImageReference(imagePath)) {
+			return await this.processMermaidImageReference(imagePath, pageId, displayWidth);
+		}
+
 		const { fullPath, size } = this.processImagePath(imagePath);
 		const width = typeof displayWidth === 'number' ? displayWidth : size;
 
@@ -74,6 +82,23 @@ export class ConfluenceImageHandler {
 		const upload = await this.readFileBytes(fileRef);
 		const url = await this.uploadBytes(pageId, upload.filename, upload.bytes, upload.contentType, upload.cacheKey);
 		return this.buildImageMacro(url, width);
+	}
+
+	private async processMermaidImageReference(imagePath: string, pageId: string, displayWidth?: number): Promise<string> {
+		const mermaidSource = this.decodeMermaidSource(imagePath);
+		if (!mermaidSource) {
+			return '';
+		}
+
+		try {
+			const bytes = await this.mermaidRenderer.renderToPng(mermaidSource);
+			const hash = this.buildMermaidHash(mermaidSource);
+			const filename = `mermaid-${hash}.png`;
+			const url = await this.uploadBytes(pageId, filename, bytes, 'image/png', `mermaid:${hash}`);
+			return this.buildImageMacro(url, displayWidth ?? 600);
+		} catch (_error) {
+			return this.buildMermaidFallbackMacro(mermaidSource);
+		}
 	}
 
 	private buildImageMacro(url: string, width?: number): string {
@@ -215,6 +240,39 @@ export class ConfluenceImageHandler {
 		return p.toLowerCase().includes('excalidraw') || path.extname(p).toLowerCase() === '.excalidraw';
 	}
 
+	private isMermaidImageReference(p: string): boolean {
+		return p.trim().startsWith('obsidian-mermaid://');
+	}
+
+	private decodeMermaidSource(p: string): string {
+		const encoded = p.trim().slice('obsidian-mermaid://'.length);
+		if (!encoded) {
+			return '';
+		}
+		try {
+			return decodeURIComponent(encoded);
+		} catch (_error) {
+			return '';
+		}
+	}
+
+	private buildMermaidHash(source: string): string {
+		return createHash('sha1').update(source).digest('hex').slice(0, 12);
+	}
+
+	private buildMermaidFallbackMacro(mermaidSource: string): string {
+		const escaped = escapeCDATA(mermaidSource);
+		return (
+			`<ac:structured-macro ac:name="markdown">` +
+			`<ac:plain-text-body><![CDATA[` +
+			'```mermaid\n' +
+			escaped +
+			'\n```' +
+			`]]></ac:plain-text-body>` +
+			`</ac:structured-macro>`
+		);
+	}
+
 	private excalidrawExportFilename(originalName: string): string {
 		let base = originalName;
 		if (base.toLowerCase().endsWith('.excalidraw')) {
@@ -294,4 +352,8 @@ function escapeXmlAttr(s: string): string {
 		.replace(/>/g, '&gt;')
 		.replace(/"/g, '&quot;')
 		.replace(/'/g, '&apos;');
+}
+
+function escapeCDATA(content: string): string {
+	return content.replace(/]]>/g, ']]&gt;');
 }
