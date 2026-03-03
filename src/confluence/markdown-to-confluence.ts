@@ -18,6 +18,7 @@ export class ConfluenceMarkdownConverter {
 		let result = html;
 		result = postProcessCodeBlocks(result);
 		result = postProcessLinks(result);
+		result = postProcessTaskLists(result);
 		result = postProcessMermaid(result);
 		result = postProcessFolding(result);
 		result = postProcessTables(result);
@@ -247,7 +248,7 @@ function postProcessCallouts(content: string): string {
 			const title = rawTitle || mappedMacro.defaultTitle;
 			const bodyMarkdown = rawBody || rawTitle;
 			const nested = bodyMarkdown ? markdownToHtmlSyncBestEffort(bodyMarkdown) : '<p></p>';
-			const nestedProcessed = postProcessMarkHighlights(postProcessTables(postProcessLinks(nested)));
+			const nestedProcessed = postProcessMarkHighlights(postProcessTables(postProcessTaskLists(postProcessLinks(nested))));
 			const nestedEscaped = escapeCDATA(nestedProcessed);
 			const titleParam = title
 				? `<ac:parameter ac:name="title">${escapeXml(title)}</ac:parameter>`
@@ -335,6 +336,151 @@ function postProcessTables(content: string): string {
 	out = out.replace(/<br(?:\s*\/)?>/g, '<br/>');
 	out = out.replace(/<hr(?![^>]*\/>)([^>]*)>/g, '<hr$1/>');
 	return out;
+}
+
+function postProcessTaskLists(content: string): string {
+	return replaceTaskListBlocks(content, { nextId: 1 });
+}
+
+function replaceTaskListBlocks(content: string, context: { nextId: number }): string {
+	let cursor = 0;
+	let out = '';
+	const openTag = '<ul class="contains-task-list">';
+
+	while (cursor < content.length) {
+		const start = content.indexOf(openTag, cursor);
+		if (start < 0) {
+			out += content.slice(cursor);
+			break;
+		}
+
+		out += content.slice(cursor, start);
+		const ulBlock = extractBalancedTagBlock(content, start, 'ul');
+		if (!ulBlock) {
+			out += content.slice(start);
+			break;
+		}
+
+		const converted = convertTaskListBlock(ulBlock.block, context);
+		out += converted;
+		cursor = ulBlock.nextIndex;
+	}
+
+	return out;
+}
+
+function convertTaskListBlock(ulBlock: string, context: { nextId: number }): string {
+	const inner = extractTagInnerContent(ulBlock, 'ul');
+	if (inner == null) {
+		return ulBlock;
+	}
+
+	const items = extractTopLevelListItems(inner);
+	if (items.length === 0) {
+		return ulBlock;
+	}
+
+	const tasks = items.map(item => convertTaskItemBlock(item, context)).join('');
+	return `<ac:task-list>${tasks}</ac:task-list>`;
+}
+
+function convertTaskItemBlock(liBlock: string, context: { nextId: number }): string {
+	const inner = extractTagInnerContent(liBlock, 'li');
+	if (inner == null) {
+		return liBlock;
+	}
+
+	let body = inner;
+	let status: 'complete' | 'incomplete' = 'incomplete';
+
+	const checkbox = /<input\s+type="checkbox"([^>]*)>/i.exec(body);
+	if (checkbox?.[0]) {
+		status = /\bchecked\b/i.test(checkbox[1] || '') ? 'complete' : 'incomplete';
+		body = body.replace(checkbox[0], '');
+	}
+
+	const taskId = context.nextId++;
+	body = replaceTaskListBlocks(body, context).trim();
+	if (!body) {
+		body = '<span></span>';
+	}
+
+	return (
+		`<ac:task>` +
+		`<ac:task-id>${taskId}</ac:task-id>` +
+		`<ac:task-status>${status}</ac:task-status>` +
+		`<ac:task-body>${body}</ac:task-body>` +
+		`</ac:task>`
+	);
+}
+
+function extractTopLevelListItems(inner: string): string[] {
+	const result: string[] = [];
+	const liTag = /<\/?li\b[^>]*>/gi;
+	let depth = 0;
+	let itemStart = -1;
+	let m: RegExpExecArray | null = null;
+
+	while ((m = liTag.exec(inner)) !== null) {
+		const token = m[0];
+		const isClose = /^<\//.test(token);
+		if (!isClose) {
+			if (depth === 0) {
+				itemStart = m.index;
+			}
+			depth += 1;
+			continue;
+		}
+
+		depth -= 1;
+		if (depth === 0 && itemStart >= 0) {
+			result.push(inner.slice(itemStart, liTag.lastIndex));
+			itemStart = -1;
+		}
+	}
+
+	return result;
+}
+
+function extractBalancedTagBlock(content: string, start: number, tag: string): { block: string; nextIndex: number } | null {
+	if (start < 0 || start >= content.length) {
+		return null;
+	}
+
+	const tagMatcher = new RegExp(`<\\/?${tag}\\b[^>]*>`, 'gi');
+	tagMatcher.lastIndex = start;
+	let depth = 0;
+	let first = true;
+	let m: RegExpExecArray | null = null;
+
+	while ((m = tagMatcher.exec(content)) !== null) {
+		if (first) {
+			first = false;
+			if (m.index !== start || /^<\//.test(m[0])) {
+				return null;
+			}
+		}
+
+		const isClose = /^<\//.test(m[0]);
+		depth += isClose ? -1 : 1;
+		if (depth === 0) {
+			return {
+				block: content.slice(start, tagMatcher.lastIndex),
+				nextIndex: tagMatcher.lastIndex
+			};
+		}
+	}
+
+	return null;
+}
+
+function extractTagInnerContent(block: string, tag: string): string | null {
+	const startTag = new RegExp(`^<${tag}\\b[^>]*>`, 'i').exec(block);
+	const endTag = new RegExp(`</${tag}>\\s*$`, 'i').exec(block);
+	if (!startTag || !endTag) {
+		return null;
+	}
+	return block.slice(startTag[0].length, endTag.index);
 }
 
 function addTOCMacro(content: string): string {
