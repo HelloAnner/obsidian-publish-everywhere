@@ -274,6 +274,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				try {
 					const imageData = await this.readLocalImageForClipboard(localFile.originalPath, file.path);
 					if (!imageData) {
+						richContent = richContent.replace('!' + localFile.placeholder, '');
 						richContent = richContent.replace(localFile.placeholder, '');
 						continue;
 					}
@@ -287,6 +288,8 @@ export default class PublishEverywherePlugin extends Plugin {
 					const base64 = this.arrayBufferToBase64(imageData);
 					const widthAttr = localFile.displayWidth ? ` width="${localFile.displayWidth}"` : '';
 					const imgTag = `<img src="data:${mime};base64,${base64}" alt="${localFile.altText || '图片'}"${widthAttr}>`;
+					// 清理占位符前可能残留的 !（来自 ![[image]] 语法中的 !）
+					richContent = richContent.replace('!' + localFile.placeholder, imgTag);
 					richContent = richContent.replace(localFile.placeholder, imgTag);
 				} catch (e) {
 					Debug.warn(`⚠️ 图片处理失败: ${localFile.originalPath}`, e);
@@ -318,8 +321,8 @@ export default class PublishEverywherePlugin extends Plugin {
 				(_, _color, text) => `<mark>${text}</mark>`
 			);
 
-			// 5. 清理残余占位符
-			richContent = richContent.replace(/__OB_CONTENT_\d+_[a-z0-9]+__/g, '');
+			// 5. 清理残余占位符（含可能的前导 !）
+			richContent = richContent.replace(/!?__OB_CONTENT_\d+_[a-z0-9]+__/g, '');
 
 			// Markdown → HTML（allowDangerousHtml 保留已插入的 HTML 标签）
 			const processor = unified()
