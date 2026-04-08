@@ -1,7 +1,13 @@
-import { Plugin, Notice, TFile, MarkdownView, requestUrl } from 'obsidian';
+import { Plugin, Notice, TFile, MarkdownView, requestUrl, normalizePath } from 'obsidian';
 import * as path from 'path';
+import { unified } from 'unified';
+import remarkParse from 'remark-parse';
+import remarkGfm from 'remark-gfm';
+import remarkRehype from 'remark-rehype';
+import rehypeRaw from 'rehype-raw';
+import rehypeStringify from 'rehype-stringify';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
-import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE } from './src/constants';
+import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE, CALLOUT_TYPE_MAPPING } from './src/constants';
 import { FeishuApiService } from './src/feishu/feishu-api';
 import { NotionApiService } from './src/notion/notion-api';
 import { PublishEverywhereSettingTab } from './src/settings';
@@ -191,7 +197,28 @@ export default class PublishEverywherePlugin extends Plugin {
 			]
 		});
 
-		// 保留一个一键发布命令（已移除重复的“含Notion”命令）
+		// 保留一个一键发布命令（已移除重复的”含Notion”命令）
+
+		this.addCommand({
+			id: 'copy-rich-content',
+			name: '复制富文本到剪贴板（含图片）',
+			checkCallback: (checking: boolean) => {
+				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
+				if (markdownView) {
+					if (!checking) {
+						this.copyRichContent(markdownView);
+					}
+					return true;
+				}
+				return false;
+			},
+			hotkeys: [
+				{
+					modifiers: ['Mod', 'Shift'],
+					key: 'c'
+				}
+			]
+		});
 	}
 
 	private enqueuePlatformPublish(type: 'feishu' | 'confluence' | 'notion' | 'github' | 'xiaohongshu', view: MarkdownView): void {
@@ -212,6 +239,132 @@ export default class PublishEverywherePlugin extends Plugin {
 		} else {
 			new Notice('⏳ 已加入发布队列...', 2000);
 		}
+	}
+
+	private async copyRichContent(view: MarkdownView): Promise<void> {
+		try {
+			const file = view.file;
+			if (!file) {
+				new Notice('❌ 无法获取当前文件');
+				return;
+			}
+
+			await this.ensureFileSaved(file);
+			const rawContent = await this.app.vault.read(file);
+
+			// 处理 Obsidian 语法，提取本地文件列表
+			const processResult = this.markdownProcessor.processCompleteWithFiles(
+				rawContent,
+				3,
+				'remove',
+				false, // 不处理子文档
+				true,  // 启用本地图片
+				false, // 不处理附件
+				'filename',
+				[]
+			);
+
+			// 在 markdown→HTML 转换前，先将所有占位符替换为真实 HTML
+			// （避免 __OB_CONTENT_xxx__ 双下划线被 markdown 解析为粗体）
+			let richContent = processResult.content;
+
+			// 1. 图片占位符 → <img> base64 data URI
+			for (const localFile of processResult.localFiles) {
+				if (!localFile.isImage) continue;
+				try {
+					const imageData = await this.readLocalImageForClipboard(localFile.originalPath, file.path);
+					if (!imageData) {
+						richContent = richContent.replace(localFile.placeholder, '');
+						continue;
+					}
+					const ext = localFile.fileName.toLowerCase().split('.').pop() || 'png';
+					const mimeMap: Record<string, string> = {
+						jpg: 'image/jpeg', jpeg: 'image/jpeg',
+						png: 'image/png', gif: 'image/gif',
+						webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp'
+					};
+					const mime = mimeMap[ext] || 'image/png';
+					const base64 = this.arrayBufferToBase64(imageData);
+					const widthAttr = localFile.displayWidth ? ` width="${localFile.displayWidth}"` : '';
+					const imgTag = `<img src="data:${mime};base64,${base64}" alt="${localFile.altText || '图片'}"${widthAttr}>`;
+					richContent = richContent.replace(localFile.placeholder, imgTag);
+				} catch (e) {
+					Debug.warn(`⚠️ 图片处理失败: ${localFile.originalPath}`, e);
+					richContent = richContent.replace(localFile.placeholder, '');
+				}
+			}
+
+			// 2. 非图片占位符（附件等）→ 移除
+			for (const localFile of processResult.localFiles) {
+				if (localFile.isImage) continue;
+				richContent = richContent.replace(localFile.placeholder, localFile.altText || '');
+			}
+
+			// 3. Callout 占位符 → HTML blockquote
+			const calloutColorMap: Record<string, string> = {
+				blue: '#dbeafe', green: '#dcfce7', yellow: '#fef9c3',
+				red: '#fee2e2', purple: '#f3e8ff', gray: '#f3f4f6', cyan: '#cffafe'
+			};
+			for (const callout of (processResult.calloutBlocks || [])) {
+				const bgColor = calloutColorMap[callout.type] || calloutColorMap[CALLOUT_TYPE_MAPPING[callout.type]?.color] || '#f3f4f6';
+				const emoji = CALLOUT_TYPE_MAPPING[callout.type]?.emoji || '📌';
+				const title = callout.title || CALLOUT_TYPE_MAPPING[callout.type]?.title || '';
+				const calloutHtml = `<blockquote style="background:${bgColor};border-left:4px solid;padding:12px 16px;margin:8px 0;border-radius:4px"><strong>${emoji} ${title}</strong><br>${callout.content}</blockquote>`;
+				richContent = richContent.replace(callout.placeholder, calloutHtml);
+			}
+
+			// 4. 高亮占位符 → <mark> 标签
+			richContent = richContent.replace(/!!OB_HL_START_(\d+)_[^!]+!!([\s\S]*?)!!OB_HL_END_[^!]+!!/g,
+				(_, _color, text) => `<mark>${text}</mark>`
+			);
+
+			// 5. 清理残余占位符
+			richContent = richContent.replace(/__OB_CONTENT_\d+_[a-z0-9]+__/g, '');
+
+			// Markdown → HTML（allowDangerousHtml 保留已插入的 HTML 标签）
+			const processor = unified()
+				.use(remarkParse)
+				.use(remarkGfm)
+				.use(remarkRehype, { allowDangerousHtml: true })
+				.use(rehypeRaw)
+				.use(rehypeStringify, { allowDangerousHtml: true });
+			const html = String(await processor.process(richContent));
+
+			// 写入剪贴板
+			const blob = new Blob([html], { type: 'text/html' });
+			await navigator.clipboard.write([new ClipboardItem({ 'text/html': blob })]);
+
+			new Notice('✅ 已复制富文本到剪贴板');
+		} catch (error: any) {
+			Debug.error('复制富文本失败:', error);
+			new Notice(`❌ 复制失败: ${error?.message || '未知错误'}`);
+		}
+	}
+
+	private async readLocalImageForClipboard(imagePath: string, sourceFilePath: string): Promise<ArrayBuffer | null> {
+		// 先尝试直接路径
+		const normalized = normalizePath(imagePath);
+		if (await this.app.vault.adapter.exists(normalized)) {
+			return await this.app.vault.adapter.readBinary(normalized);
+		}
+
+		// 通过 metadataCache 解析 Obsidian 链接路径
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(normalized, sourceFilePath);
+		if (resolved instanceof TFile) {
+			return await this.app.vault.readBinary(resolved);
+		}
+
+		Debug.warn(`⚠️ 找不到图片: ${imagePath}`);
+		return null;
+	}
+
+	private arrayBufferToBase64(buffer: ArrayBuffer): string {
+		const bytes = new Uint8Array(buffer);
+		let binary = '';
+		for (let i = 0; i < bytes.byteLength; i++) {
+			binary += String.fromCharCode(bytes[i]);
+		}
+		return window.btoa(binary);
 	}
 
 	async loadSettings(): Promise<void> {
