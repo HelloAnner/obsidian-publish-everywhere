@@ -331,7 +331,10 @@ export default class PublishEverywherePlugin extends Plugin {
 				.use(remarkRehype, { allowDangerousHtml: true })
 				.use(rehypeRaw)
 				.use(rehypeStringify, { allowDangerousHtml: true });
-			const html = String(await processor.process(richContent));
+			let html = String(await processor.process(richContent));
+
+			// 表格加宽度，避免飞书粘贴后表格过窄
+			html = html.replace(/<table>/g, '<table style="width:100%">');
 
 			// 写入剪贴板
 			const blob = new Blob([html], { type: 'text/html' });
