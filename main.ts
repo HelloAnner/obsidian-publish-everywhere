@@ -8,7 +8,7 @@ import rehypeRaw from 'rehype-raw';
 import rehypeStringify from 'rehype-stringify';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE, CALLOUT_TYPE_MAPPING } from './src/constants';
-import { FeishuApiService } from './src/feishu/feishu-api';
+import { FeishuMcpPublisher } from './src/feishu/feishu-mcp-publisher';
 import { NotionApiService } from './src/notion/notion-api';
 import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
@@ -43,7 +43,7 @@ const DEFAULT_SETTINGS: PublishEverywhereSettings = {
 
 export default class PublishEverywherePlugin extends Plugin {
 	settings: PublishEverywhereSettings;
-	feishuApi: FeishuApiService;
+	feishuPublisher: FeishuMcpPublisher;
 	notionApi: NotionApiService;
 	markdownProcessor: MarkdownProcessor;
 	publishQueue: CallbackPublishQueue;
@@ -53,18 +53,13 @@ export default class PublishEverywherePlugin extends Plugin {
 		await this.loadSettings();
 
 		// 初始化服务
-		this.feishuApi = new FeishuApiService(this.settings, this.app);
-		this.notionApi = new NotionApiService(this.settings, this.app);
 		this.markdownProcessor = new MarkdownProcessor(this.app);
+		this.feishuPublisher = new FeishuMcpPublisher(this.app, this.settings, this.markdownProcessor);
+		this.notionApi = new NotionApiService(this.settings, this.app);
 
 		// 初始化发布队列
 		this.publishQueue = new CallbackPublishQueue(async (task: PublishTask) => {
 			await this.executePublishTask(task);
-		});
-
-		// 注册自定义协议处理器，实现自动授权回调
-		this.registerObsidianProtocolHandler('feishu-auth', (params) => {
-			this.handleOAuthCallback(params);
 		});
 
 		// 添加设置页面
@@ -380,49 +375,8 @@ export default class PublishEverywherePlugin extends Plugin {
 
 	async saveSettings(): Promise<void> {
 		await this.saveData(this.settings);
-		if (this.feishuApi) {
-			this.feishuApi.updateSettings(this.settings);
-		}
-	}
-
-	/**
-	 * 处理OAuth回调
-	 */
-	private async handleOAuthCallback(params: Record<string, string>): Promise<void> {
-		this.log('Processing OAuth callback');
-
-		if (params.code) {
-			new Notice('🔄 正在处理授权回调...');
-
-			try {
-				const success = await this.feishuApi.processCallback(`obsidian://feishu-auth?${new URLSearchParams(params).toString()}`);
-
-				if (success) {
-					this.log('OAuth authorization successful');
-					new Notice('🎉 自动授权成功！');
-					await this.saveSettings();
-
-					// 通知设置页面刷新和分享流程继续 - 使用自定义事件
-					window.dispatchEvent(new CustomEvent('feishu-auth-success', {
-						detail: {
-							timestamp: Date.now(),
-							source: 'oauth-callback'
-						}
-					}));
-				} else {
-					this.log('OAuth authorization failed', 'warn');
-					new Notice('❌ 授权处理失败，请重试');
-				}
-			} catch (error) {
-				this.handleError(error as Error, 'OAuth回调处理');
-			}
-		} else if (params.error) {
-			const errorMsg = params.error_description || params.error;
-			this.log(`OAuth error: ${errorMsg}`, 'error');
-			new Notice(`❌ 授权失败: ${errorMsg}`);
-		} else {
-			this.log('Invalid OAuth callback parameters', 'warn');
-			new Notice('❌ 无效的授权回调');
+		if (this.feishuPublisher) {
+			this.feishuPublisher.updateSettings(this.settings);
 		}
 	}
 
@@ -676,98 +630,8 @@ export default class PublishEverywherePlugin extends Plugin {
 			new Notice('No file is currently open');
 			return;
 		}
-
-		// 检查配置
-		if (!this.settings.appId || !this.settings.appSecret || !this.settings.callbackUrl) {
-			this.log('[Publish to Feishu] Missing Feishu configuration', 'error');
-			new Notice('请先完成飞书配置');
-			return;
-		}
-
-		// 检查frontmatter中的feishu属性
-		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		if (!frontmatter?.feishu) {
-			this.log('[Publish to Feishu] No Feishu URL in frontmatter', 'error');
-			new Notice('当前笔记缺少 feishu Front Matter 信息');
-			return;
-		}
-
-		// 解析feishu URL
-		const parentUrl = frontmatter.feishu;
-		const parsedParent = this.feishuApi.parseFeishuParentUrl(parentUrl);
-		if (!parsedParent.parsed) {
-			this.log(`[Publish to Feishu] Invalid Feishu URL: ${parsedParent.error}`, 'error');
-			new Notice(`feishu URL格式错误: ${parsedParent.error}`);
-			return;
-		}
-
-		try {
-			const title = file.basename;
-			new Notice('⏳ 正在发布到飞书...');
-
-			// 读取文件内容
-			await this.ensureFileSaved(file);
-			const rawContent = await this.app.vault.read(file);
-
-			// 处理Markdown内容
-			const processResult = this.markdownProcessor.processCompleteWithFiles(
-				rawContent,
-				3, // maxDepth
-				'remove', // frontMatterHandling
-				this.settings.enableSubDocumentUpload,
-				this.settings.enableLocalImageUpload,
-				this.settings.enableLocalAttachmentUpload,
-				this.settings.titleSource,
-				this.settings.codeBlockFilterLanguages || []
-			);
-
-			// 发布到飞书（带父位置）
-			const result = await this.feishuApi.shareMarkdownWithFiles(
-				title,
-				processResult,
-				undefined, // statusNotice
-				false, // isTemporary
-				{
-					type: parsedParent.type,
-					nodeToken: parsedParent.nodeToken,
-					folderId: parsedParent.folderId,
-					spaceId: parsedParent.spaceId,
-					host: parsedParent.host
-				}
-			);
-
-			if (result.success && result.url) {
-				// 检查是否为更新模式
-				const isUpdateMode = this.checkUpdateMode(processResult.frontMatter);
-
-				// 更新frontmatter
-				if (this.settings.enableShareMarkInFrontMatter) {
-					try {
-						const updatedContent = this.markdownProcessor.addShareMarkToFrontMatter(rawContent, result.url);
-						await this.app.vault.modify(file, updatedContent);
-						this.log('Feishu frontmatter updated');
-					} catch (error) {
-						this.log(`Failed to update frontmatter: ${error.message}`, 'warn');
-					}
-				}
-
-				// 显示成功通知
-				this.showSuccessNotification(result);
-
-				const operation = isUpdateMode.shouldUpdate ? '更新' : '发布';
-				const notice = new Notice(`✅ 成功${operation}到飞书`, 5000);
-				notice.noticeEl.createEl('button', {
-					text: '查看页面',
-					cls: 'mod-cta'
-				}).onclick = () => {
-					window.open(result.url, '_blank');
-				};
-			} else {
-				new Notice(`❌ 发布失败: ${result.error}`);
-			}
-		} catch (error) {
-			this.handleError(error as Error, '发布到飞书');
-		}
+		await this.ensureFileSaved(file);
+		await this.shareFileInternal(file);
 	}
 
 	/**
@@ -1368,186 +1232,51 @@ export default class PublishEverywherePlugin extends Plugin {
 
 	/**
 	 * 内部方法：实际执行文件分享（由队列调用）
+	 * 走飞书官方 MCP 服务，配置项仅需一个已授权的 MCP URL
 	 */
 	private async shareFileInternal(file: TFile): Promise<void> {
 		this.log(`Starting file share process for: ${file.path}`);
 
-		// 创建持续状态提示（可抑制）
-		const statusNotice = this.settings.suppressShareNotices ? undefined : new Notice('🔄 正在分享到飞书...', 0); // 0表示不自动消失
+		if (!this.feishuPublisher.isConfigured()) {
+			new Notice('❌ 请先在设置中填入飞书 MCP URL（mcp.feishu.cn 网页授权后获取）');
+			return;
+		}
+
+		const statusNotice = this.settings.suppressShareNotices
+			? undefined
+			: new Notice('🔄 正在通过 MCP 发布到飞书...', 0);
 
 		try {
-			// 检查基本授权状态
-			if (!this.settings.accessToken || !this.settings.userInfo) {
-				this.log('Authorization required', 'warn');
-				statusNotice?.hide();
-				new Notice('❌ 请先在设置中完成飞书授权');
-				return;
-			}
-
-			// 确保文件已保存到磁盘
-			this.log('Ensuring file is saved to disk');
 			await this.ensureFileSaved(file);
-
-			// 读取文件内容
-			this.log('Reading file content');
 			const rawContent = await this.app.vault.read(file);
+			const frontMatter = this.app.metadataCache.getFileCache(file)?.frontmatter || null;
+			const isUpdateMode = this.checkUpdateMode(frontMatter);
 
-			// 使用Markdown处理器处理内容（包含文件信息和Front Matter处理）
-			const processResult = this.markdownProcessor.processCompleteWithFiles(
-				rawContent,
-				3, // maxDepth
-				this.settings.frontMatterHandling,
-				this.settings.enableSubDocumentUpload,
-				this.settings.enableLocalImageUpload,
-				this.settings.enableLocalAttachmentUpload,
-				this.settings.titleSource,
-				this.settings.codeBlockFilterLanguages || []
-			);
-
-			// 根据设置提取文档标题
-			const title = this.markdownProcessor.extractTitle(
-				file.basename,
-				processResult.frontMatter,
-				this.settings.titleSource
-			);
-			this.log(`Processing file with title: ${title}`);
-
-			// 检查是否为更新模式（存在 feishu_url 标记）
-			const isUpdateMode = this.checkUpdateMode(processResult.frontMatter);
-			let result: ShareResult;
-			let urlChanged = false;
-
-			if (isUpdateMode.shouldUpdate) {
-				this.log(`Update mode detected for existing document: ${isUpdateMode.feishuUrl}`);
-				statusNotice?.setMessage('🔍 检查现有文档可访问性...');
-
-				// 检查现有URL是否可访问
-				const urlAccessible = await this.feishuApi.checkDocumentUrlAccessibility(isUpdateMode.feishuUrl!);
-
-				if (urlAccessible.isAccessible) {
-					this.log('Existing document is accessible, updating content');
-					statusNotice?.setMessage('🔄 正在更新现有文档...');
-
-					// 调用更新现有文档的方法
-					result = await this.feishuApi.updateExistingDocument(
-						isUpdateMode.feishuUrl!,
-						title,
-						processResult,
-						statusNotice
-					);
-				} else if (urlAccessible.needsReauth) {
-					this.log(`Token needs reauth, will retry after authorization: ${urlAccessible.error}`);
-					statusNotice?.setMessage('🔑 需要重新授权，授权后将重试更新...');
-
-					// 直接触发重新授权，不创建完整文档
-					const authSuccess = await this.feishuApi.ensureValidTokenWithReauth(statusNotice);
-
-					if (authSuccess) {
-						this.log('Authorization completed, retrying original document access');
-						statusNotice?.setMessage('🔄 重新检查原文档可访问性...');
-
-						// 授权成功后，重新检查原文档可访问性
-						const retryAccessible = await this.feishuApi.checkDocumentUrlAccessibility(isUpdateMode.feishuUrl!);
-
-						if (retryAccessible.isAccessible) {
-							this.log('Original document is now accessible after reauth, updating it');
-							statusNotice?.setMessage('🔄 正在更新原文档...');
-
-							// 直接更新原文档
-							result = await this.feishuApi.updateExistingDocument(
-								isUpdateMode.feishuUrl!,
-								title,
-								processResult,
-								statusNotice
-							);
-						} else {
-							this.log(`Original document still not accessible after reauth: ${retryAccessible.error}, creating new document`);
-							// 原文档仍不可访问，创建新文档
-							result = await this.feishuApi.shareMarkdownWithFiles(title, processResult, statusNotice);
-							urlChanged = true;
-
-							if (result.success) {
-								this.log(`Document URL changed from ${isUpdateMode.feishuUrl} to ${result.url}`);
-							}
-						}
-					} else {
-						throw new Error('重新授权失败，请手动重新授权');
-					}
-				} else {
-					this.log(`Existing document is not accessible: ${urlAccessible.error}, creating new document`);
-					statusNotice?.setMessage('📄 原文档不可访问，正在创建新文档...');
-
-					// 原文档不可访问，创建新文档
-					result = await this.feishuApi.shareMarkdownWithFiles(title, processResult, statusNotice);
-					urlChanged = true;
-
-					if (result.success) {
-						this.log(`Document URL changed from ${isUpdateMode.feishuUrl} to ${result.url}`);
-					}
-				}
-			} else {
-				this.log('Normal share mode detected, creating new document');
-
-				// 调用API分享（内部会自动检查和刷新token，如果需要重新授权会等待完成）
-				result = await this.feishuApi.shareMarkdownWithFiles(title, processResult, statusNotice);
-			}
-
-			// 隐藏状态提示
+			const result = await this.feishuPublisher.publishFile(file, statusNotice);
 			statusNotice?.hide();
 
-			if (result.success) {
-				if (isUpdateMode.shouldUpdate && !urlChanged) {
-					this.log(`Document updated successfully: ${result.title}`);
-
-					// 更新模式：只更新feishu_shared_at时间戳
-					if (this.settings.enableShareMarkInFrontMatter) {
-						try {
-							this.log('Updating share timestamp in front matter');
-							const updatedContent = this.updateShareTimestamp(rawContent);
-							await this.app.vault.modify(file, updatedContent);
-							this.log('Share timestamp updated successfully');
-						} catch (error) {
-							this.log(`Failed to update share timestamp: ${error.message}`, 'warn');
-						}
-					}
-				} else {
-					// 新分享模式或URL发生变化的情况
-					if (urlChanged) {
-						this.log(`Document URL changed, updating front matter: ${result.title}`);
-					} else {
-						this.log(`File shared successfully: ${result.title}`);
-					}
-
-					// 添加完整的分享标记（新分享或URL变化）
-					if (this.settings.enableShareMarkInFrontMatter && result.url) {
-						try {
-							this.log('Adding/updating share mark in front matter');
-							const updatedContent = this.markdownProcessor.addShareMarkToFrontMatter(rawContent, result.url);
-							await this.app.vault.modify(file, updatedContent);
-							this.log('Share mark added/updated successfully');
-
-							// 如果URL发生了变化，显示特殊通知
-							if (!this.settings.suppressShareNotices) {
-								if (urlChanged && isUpdateMode.shouldUpdate) {
-									new Notice(`📄 文档链接已更新（原链接不可访问）\n新链接：${result.url}`, 8000);
-								}
-							}
-						} catch (error) {
-							this.log(`Failed to add/update share mark: ${error.message}`, 'warn');
-							// 不影响主要的分享成功流程，只记录警告
-						}
-					}
-				}
-
-				this.showSuccessNotification(result);
-			} else {
+			if (!result.success || !result.url) {
 				const operation = isUpdateMode.shouldUpdate ? '更新' : '分享';
 				this.log(`${operation} failed: ${result.error}`, 'error');
 				new Notice(`❌ ${operation}失败：${result.error}`);
+				return;
 			}
 
+			if (this.settings.enableShareMarkInFrontMatter) {
+				try {
+					const updatedContent = isUpdateMode.shouldUpdate
+						? this.updateShareTimestamp(rawContent)
+						: this.markdownProcessor.addShareMarkToFrontMatter(rawContent, result.url);
+					if (updatedContent !== rawContent) {
+						await this.app.vault.modify(file, updatedContent);
+					}
+				} catch (error) {
+					this.log(`Failed to update share mark: ${error.message}`, 'warn');
+				}
+			}
+
+			this.showSuccessNotification(result);
 		} catch (error) {
-			// 确保隐藏状态提示
 			statusNotice?.hide();
 			this.handleError(error as Error, '文件分享');
 		}
@@ -1678,19 +1407,6 @@ export default class PublishEverywherePlugin extends Plugin {
 		}
 
 		return lines.join('\n');
-	}
-
-	/**
-	 * 检查并刷新token
-	 */
-	async ensureValidAuth(): Promise<boolean> {
-		if (!this.settings.accessToken) {
-			return false;
-		}
-
-		// 这里可以添加token有效性检查和自动刷新逻辑
-		// 暂时简单返回true
-		return true;
 	}
 
 	/**

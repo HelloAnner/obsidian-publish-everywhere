@@ -13,27 +13,6 @@ export type TitleSource = 'filename' | 'frontmatter';
 export type FrontMatterHandling = 'remove' | 'keep-as-code';
 
 /**
- * 链接分享权限类型
- */
-export type LinkSharePermission = 'tenant_readable' | 'tenant_editable' | 'anyone_readable' | 'anyone_editable';
-
-/**
- * 目标类型：云空间或知识库
- */
-export type TargetType = 'drive' | 'wiki';
-
-/**
- * 父页面/父文件夹位置信息
- */
-export interface ParentLocation {
-	type: 'wiki' | 'drive';
-	spaceId?: string;
-	nodeToken?: string;
-	folderId?: string;
-	host?: string;
-}
-
-/**
  * Notion 父页面解析结果
  */
 export interface NotionParentLocation {
@@ -42,64 +21,19 @@ export interface NotionParentLocation {
 	error?: string;
 }
 
-/**
- * 知识库空间信息
- */
-export interface WikiSpace {
-	space_id: string;
-	name: string;
-	description?: string;
-	space_type: string;
-	visibility: string;
-}
-
-/**
- * 知识库节点信息
- */
-export interface WikiNode {
-	space_id: string;
-	node_token: string;
-	obj_token: string;
-	obj_type: string;
-	parent_node_token?: string;
-	title: string;
-	has_child: boolean;
-	node_type?: string;
-	creator?: string;
-	owner?: string;
-}
-
 export interface FeishuSettings extends AutomationSharedSettings {
-	appId: string;
-	appSecret: string;
-	callbackUrl: string;
-	accessToken: string;
-	refreshToken: string;
-	userInfo: FeishuUserInfo | null;
-
-	// 新增：目标类型选择
-	targetType: TargetType;
-
-	// 云空间设置（原有）
-	defaultFolderId: string;
-	defaultFolderName: string;
+	// 飞书官方 MCP 服务地址（含用户 token），由用户在 https://mcp.feishu.cn 网页授权获得
+	mcpUrl: string;
 
 	titleSource: TitleSource;
 	frontMatterHandling: FrontMatterHandling;
-	// 新增：链接分享设置
-	enableLinkShare: boolean;
-	linkSharePermission: LinkSharePermission;
-	// 新增：内容处理设置
-	enableSubDocumentUpload: boolean;
-	enableLocalImageUpload: boolean;
-	enableLocalAttachmentUpload: boolean;
-	// 新增：代码块过滤（多选，命中则移除）
+	// 代码块过滤（多选，命中则移除）
 	codeBlockFilterLanguages: string[];
-	// 新增：分享标记设置
+	// 分享标记设置
 	enableShareMarkInFrontMatter: boolean;
-	// 新增：通知抑制设置（取消分享状态通知）
+	// 通知抑制设置（取消分享状态通知）
 	suppressShareNotices: boolean;
-	// 新增：简洁成功通知（仅一行提示）
+	// 简洁成功通知（仅一行提示）
 	simpleSuccessNotice: boolean;
 }
 
@@ -113,38 +47,6 @@ export interface AutomationSharedSettings {
 	xiaohongshuLastStyleSeed: number;
 }
 
-export interface FeishuUserInfo {
-	name: string;
-	avatar_url: string;
-	email: string;
-	user_id: string;
-}
-
-export interface FeishuOAuthResponse {
-	code: number;
-	msg?: string;
-	// v1 API格式
-	data?: {
-		access_token: string;
-		refresh_token: string;
-		expires_in: number;
-		token_type: string;
-	};
-	// v2 API格式（直接在根级别）
-	access_token?: string;
-	refresh_token?: string;
-	expires_in?: number;
-	token_type?: string;
-	// v2 API错误格式
-	error?: string;
-	error_description?: string;
-}
-
-export interface FeishuApiError {
-	code: number;
-	msg: string;
-}
-
 export interface ShareResult {
 	success: boolean;
 	url?: string;
@@ -153,83 +55,9 @@ export interface ShareResult {
 	sourceFileToken?: string; // 源文件token，用于临时文档清理
 }
 
-export interface FeishuFileUploadResponse {
-	code: number;
-	msg: string;
-	data: {
-		file_token: string;
-	};
-}
-
-export interface FeishuDocCreateResponse {
-	code: number;
-	msg: string;
-	data: {
-		document: {
-			document_id: string;
-			revision_id: number;
-			title: string;
-		};
-	};
-}
-
-export interface FeishuFolderListResponse {
-	code: number;
-	msg: string;
-	data: {
-		files: Array<{
-			token: string;
-			name: string;
-			type: string;
-			parent_token: string;
-			url: string;
-			created_time: string;
-			modified_time: string;
-		}>;
-		has_more: boolean;
-		page_token: string;
-	};
-}
-
-/**
- * 知识库空间列表响应
- */
-export interface WikiSpaceListResponse {
-	code: number;
-	msg: string;
-	data: {
-		items: WikiSpace[];
-		page_token?: string;
-		has_more: boolean;
-	};
-}
-
 /**
  * 知识库节点列表响应
  */
-export interface WikiNodeListResponse {
-	code: number;
-	msg: string;
-	data: {
-		items: WikiNode[];
-		page_token?: string;
-		has_more: boolean;
-	};
-}
-
-/**
- * 移动文档到知识库响应
- */
-export interface MoveDocToWikiResponse {
-	code: number;
-	msg: string;
-	data: {
-		wiki_token?: string;
-		task_id?: string;
-		applied?: boolean;
-	};
-}
-
 /**
  * 本地文件信息
  */
@@ -308,58 +136,6 @@ export interface ProcessContext {
 	// Front Matter 处理设置
 	frontMatterHandling?: 'remove' | 'keep-as-code';
 	titleSource?: 'filename' | 'frontmatter';
-}
-
-/**
- * 飞书文档块响应
- */
-export interface FeishuDocBlocksResponse {
-	code: number;
-	msg: string;
-	data: {
-		items: Array<{
-			block_id: string;
-			block_type: number;
-			parent_id: string;
-			children: string[];
-			text?: {
-				elements: Array<{
-					text_run?: {
-						content: string;
-					};
-				}>;
-			};
-		}>;
-		has_more: boolean;
-		page_token: string;
-	};
-}
-
-/**
- * 飞书块创建响应
- */
-export interface FeishuBlockCreateResponse {
-	code: number;
-	msg: string;
-	data: {
-		children: Array<{
-			block_id: string;
-			block_type: number;
-			children?: string[];
-		}>;
-	};
-}
-
-/**
- * 占位符块信息
- */
-export interface PlaceholderBlock {
-	blockId: string;
-	parentId: string;
-	index: number;
-	placeholder: string;
-	fileInfo?: LocalFileInfo;     // 文件信息（可选，用于文件/图片）
-	calloutInfo?: CalloutInfo;    // Callout 信息（可选，用于 Callout 块）
 }
 
 // ==================== Notion 相关类型定义 ====================
