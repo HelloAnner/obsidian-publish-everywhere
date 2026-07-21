@@ -58,7 +58,7 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 
 		const tipEl = containerEl.createDiv('setting-item-description');
 		tipEl.createEl('p').textContent = '💡 发布逻辑与 KMS 一致：`feishu` 是 Wiki 父页面；优先更新 `feishu_url`，否则在父页面下按文件名匹配同名子页面，找不到才新建。';
-		tipEl.createEl('p').textContent = '💡 每次发布成功都会回填最新的 `feishu_url` 与 `feishu_shared_at`；文件改名后会同步更新飞书标题。';
+		tipEl.createEl('p').textContent = '💡 每次发布成功都会回填最新的 `feishu_url`；文件改名后会同步更新飞书标题。';
 		tipEl.createEl('p').textContent = '⚠️ 为保持最小权限，本地图片和附件会替换为文字占位，仅保留 http(s) 网络图片。';
 
 		// Notion 设置部分

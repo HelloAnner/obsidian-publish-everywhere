@@ -1082,23 +1082,12 @@ export class MarkdownProcessor {
 	 * @returns 更新后的文件内容
 	 */
 	addShareMarkToFrontMatter(content: string, shareUrl: string): string {
-		// 获取东8区时间并格式化为 YYYY-MM-DD HH:mm
-		const now = new Date();
-		const chinaTime = new Date(now.getTime() + (8 * 60 * 60 * 1000)); // UTC+8
-		const yyyy = chinaTime.getUTCFullYear();
-		const mm = String(chinaTime.getUTCMonth() + 1).padStart(2, '0');
-		const dd = String(chinaTime.getUTCDate()).padStart(2, '0');
-		const HH = String(chinaTime.getUTCHours()).padStart(2, '0');
-		const MM = String(chinaTime.getUTCMinutes()).padStart(2, '0');
-		const currentTime = `${yyyy}-${mm}-${dd} ${HH}:${MM}`;
-
 		// 检查是否有Front Matter
 			if (!content.startsWith('---\n') && !content.startsWith('---\r\n')) {
 				// 没有Front Matter，创建新的
 				const newFrontMatter = [
 					'---',
 					`feishu_url: "${shareUrl}"`,
-					`feishu_shared_at: "${currentTime}"`,
 					'---',
 					''
 				].join('\n');
@@ -1127,8 +1116,7 @@ export class MarkdownProcessor {
 
 			// 在Front Matter中查找并更新/添加飞书相关字段
 			const fieldsToUpdate: { [key: string]: string } = {
-				'feishu_url': `"${shareUrl}"`,
-				'feishu_shared_at': `"${currentTime}"`
+				'feishu_url': `"${shareUrl}"`
 			};
 
 		// 记录哪些字段已经存在
