@@ -1,4 +1,3 @@
-import type { FeishuAuthState } from './feishu/feishu-auth-types';
 
 /**
  * 飞书分享插件类型定义
@@ -19,8 +18,8 @@ export interface NotionParentLocation {
 }
 
 export interface FeishuSettings extends AutomationSharedSettings {
-	// PersonalAgent + 用户 OAuth 状态；敏感字段由 Electron safeStorage 加密。
-	feishuAuth: FeishuAuthState | null;
+	/** data.json 只保存标记；MCP URL 本体存放在系统钥匙串（app.secretStorage）。 */
+	feishuMcpUrlSaved: boolean;
 
 	frontMatterHandling: FrontMatterHandling;
 	// 代码块过滤（多选，命中则移除）

@@ -8,8 +8,8 @@ import rehypeRaw from 'rehype-raw';
 import rehypeStringify from 'rehype-stringify';
 import { FeishuSettings, ShareResult, NotionSettings } from './src/types';
 import { DEFAULT_SETTINGS as DEFAULT_FEISHU_SETTINGS, SUCCESS_NOTICE_TEMPLATE, CALLOUT_TYPE_MAPPING } from './src/constants';
-import { FeishuRestPublisher } from './src/feishu/feishu-rest-publisher';
-import { FeishuAuthService } from './src/feishu/feishu-auth';
+import { FeishuMcpPublisher, FEISHU_MCP_URL_SECRET_ID } from './src/feishu/feishu-mcp-publisher';
+import { SecretStore } from './src/shared/secret-store';
 import { NotionApiService } from './src/notion/notion-api';
 import { PublishEverywhereSettingTab } from './src/settings';
 import { MarkdownProcessor } from './src/markdown-processor';
@@ -44,8 +44,8 @@ const DEFAULT_SETTINGS: PublishEverywhereSettings = {
 
 export default class PublishEverywherePlugin extends Plugin {
 	settings: PublishEverywhereSettings;
-	feishuPublisher: FeishuRestPublisher;
-	feishuAuth: FeishuAuthService;
+	feishuPublisher: FeishuMcpPublisher;
+	secretStore: SecretStore;
 	notionApi: NotionApiService;
 	markdownProcessor: MarkdownProcessor;
 	publishQueue: CallbackPublishQueue;
@@ -56,19 +56,13 @@ export default class PublishEverywherePlugin extends Plugin {
 
 		// 初始化服务
 		this.markdownProcessor = new MarkdownProcessor(this.app);
-		this.feishuAuth = new FeishuAuthService({
-			getState: () => this.settings.feishuAuth,
-			saveState: async (state) => {
-				this.settings.feishuAuth = state;
-				await this.saveSettings();
-			},
-			getSecretStorage: () => this.app.secretStorage,
-		});
-		this.feishuPublisher = new FeishuRestPublisher(
+		this.secretStore = new SecretStore(this.app);
+		await this.migrateFeishuSecrets();
+		this.feishuPublisher = new FeishuMcpPublisher(
 			this.app,
 			this.settings,
 			this.markdownProcessor,
-			this.feishuAuth,
+			() => this.secretStore.get(FEISHU_MCP_URL_SECRET_ID),
 		);
 		this.notionApi = new NotionApiService(this.settings, this.app);
 
@@ -85,7 +79,32 @@ export default class PublishEverywherePlugin extends Plugin {
 		}
 
 	onunload(): void {
-		this.feishuAuth?.cancelPendingOperations();
+	}
+
+	/**
+	 * 历史版本遗留数据迁移：
+	 *  - 早期 MCP 版本把 mcpUrl 明文存在 data.json → 迁入系统钥匙串；
+	 *  - OAuth 版本的 feishuAuth 状态与 feishu-credentials secret → 清除。
+	 */
+	private async migrateFeishuSecrets(): Promise<void> {
+		let dirty = false;
+		const legacy = this.settings as unknown as Record<string, unknown>;
+
+		if (typeof legacy.mcpUrl === 'string' && legacy.mcpUrl.trim()) {
+			if (this.secretStore.set(FEISHU_MCP_URL_SECRET_ID, legacy.mcpUrl.trim())) {
+				this.settings.feishuMcpUrlSaved = true;
+			}
+			delete legacy.mcpUrl;
+			dirty = true;
+		}
+
+		if ('feishuAuth' in legacy) {
+			delete legacy.feishuAuth;
+			this.secretStore.clear('feishu-credentials');
+			dirty = true;
+		}
+
+		if (dirty) await this.saveSettings();
 	}
 
 	/**
@@ -1260,7 +1279,7 @@ export default class PublishEverywherePlugin extends Plugin {
 		this.log(`Starting file share process for: ${file.path}`);
 
 		if (!this.feishuPublisher.isConfigured()) {
-			new Notice('❌ 请先在插件设置中点击“连接飞书（个人授权）”');
+			new Notice('❌ 请先在插件设置中填入飞书 MCP URL');
 			return;
 		}
 

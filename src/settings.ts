@@ -1,5 +1,6 @@
 import { App, PluginSettingTab, Setting, Notice, TextComponent } from 'obsidian';
 import PublishEverywherePlugin from '../main';
+import { FEISHU_MCP_URL_SECRET_ID } from './feishu/feishu-mcp-publisher';
 
 export class PublishEverywhereSettingTab extends PluginSettingTab {
 	plugin: PublishEverywherePlugin;
@@ -17,58 +18,9 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 		this.renderConfluenceSettings(containerEl);
 		containerEl.createEl('hr');
 
-		// 飞书分享设置（PersonalAgent + 用户 OAuth，直接调用 REST API）
+		// 飞书分享设置（托管 MCP：粘贴 mcp.feishu.cn 个人链接即可发布）
 		containerEl.createEl('h2', { text: '飞书分享设置' });
-
-		const descEl = containerEl.createDiv('setting-item-description');
-		descEl.createEl('p', {
-			text: '使用当前浏览器中的飞书账号进行个人授权。无需安装 CLI、配置企业机器人或填写 App Secret。首次连接可能连续打开两个飞书确认页面。'
-		});
-
-		const authStatus = this.plugin.feishuAuth.getStatus();
-		const statusText = authStatus.connected
-			? `✅ 已连接：${authStatus.userName || '飞书用户'}`
-			: authStatus.hasPersonalApp
-				? '尚未授权文档访问；已保留个人连接，可直接继续授权'
-				: '尚未连接飞书';
-		const authSetting = new Setting(containerEl)
-			.setName('飞书个人授权')
-			.setDesc(statusText);
-
-		authSetting.addButton(button => button
-			.setButtonText(authStatus.connected ? '重新授权' : '连接飞书（个人授权）')
-			.setCta()
-			.onClick(async () => {
-				button.setDisabled(true).setButtonText('等待浏览器确认…');
-				try {
-					await this.plugin.feishuAuth.connect(message => authSetting.setDesc(message));
-					new Notice('✅ 飞书个人授权成功');
-					this.display();
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					authSetting.setDesc(`❌ ${message}`);
-					button.setDisabled(false).setButtonText(authStatus.connected ? '重新授权' : '重新连接');
-					new Notice(`❌ 飞书连接失败：${message}`, 8000);
-				}
-			}));
-
-		if (authStatus.connected) {
-			authSetting.addButton(button => button
-				.setButtonText('退出登录')
-				.onClick(async () => {
-					await this.plugin.feishuAuth.logout();
-					new Notice('已退出飞书登录；个人连接已保留');
-					this.display();
-				}));
-		}
-		authSetting.addButton(button => button
-			.setButtonText('重置连接')
-			.setWarning()
-			.onClick(async () => {
-				await this.plugin.feishuAuth.resetConnection();
-				new Notice('已清除本机飞书凭据');
-				this.display();
-			}));
+		this.renderFeishuSettings(containerEl);
 
 		new Setting(containerEl)
 			.setName('Front Matter 处理')
@@ -81,6 +33,8 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 					this.plugin.settings.frontMatterHandling = value;
 					await this.plugin.saveSettings();
 				}));
+
+
 
 		new Setting(containerEl)
 			.setName('简洁成功通知')
@@ -119,6 +73,73 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 		containerEl.createEl('hr');
 		containerEl.createEl('h2', { text: '小红书发布设置' });
 		this.renderXiaohongshuSettings(containerEl);
+	}
+
+
+	private renderFeishuSettings(containerEl: HTMLElement): void {
+		const descEl = containerEl.createDiv('setting-item-description');
+		descEl.createEl('p', {
+			text: '在飞书开放平台「MCP 服务」页面创建服务（勾选 create-doc / update-doc / list-docs / fetch-doc），复制服务器 URL 粘贴到下方。无需浏览器授权、无需 App Secret。'
+		});
+		descEl.createEl('p', {
+			text: '该链接以个人身份调用飞书工具，相当于个人密钥：插件将其保存到系统钥匙串（Keychain），不会明文写入 data.json。链接过期后（默认授权后 7 天，可在飞书页面“重新授权”延长）需重新复制粘贴。'
+		});
+
+		if (!this.plugin.secretStore.isAvailable()) {
+			const warnEl = containerEl.createDiv('setting-item-description');
+			warnEl.createEl('p', {
+				text: '⚠️ 当前 Obsidian 版本不支持系统安全凭据存储（需要 1.11.4 或更高版本），无法安全保存 MCP URL，请升级 Obsidian。'
+			});
+		}
+
+		const currentUrl = this.plugin.secretStore.get(FEISHU_MCP_URL_SECRET_ID) || '';
+		const urlSetting = new Setting(containerEl)
+			.setName('飞书 MCP URL')
+			.setDesc(this.plugin.settings.feishuMcpUrlSaved ? '✅ 已保存到系统钥匙串' : '尚未配置')
+			.addText((text: TextComponent) => {
+				text.setPlaceholder('https://mcp.feishu.cn/mcp/mcp_...')
+					.setValue(currentUrl)
+					.onChange(async (value: string) => {
+						const trimmed = value.trim();
+						if (!trimmed) return; // 清空请使用“清除”按钮
+						if (!this.plugin.secretStore.set(FEISHU_MCP_URL_SECRET_ID, trimmed)) {
+							new Notice('❌ 系统钥匙串不可用，无法保存 MCP URL');
+							return;
+						}
+						this.plugin.settings.feishuMcpUrlSaved = true;
+						await this.plugin.saveSettings();
+						urlSetting.setDesc('✅ 已保存到系统钥匙串');
+					});
+				text.inputEl.type = 'password';
+			});
+
+		urlSetting.addButton(button => button
+			.setButtonText('测试连接')
+			.setCta()
+			.onClick(async () => {
+				button.setDisabled(true).setButtonText('测试中…');
+				try {
+					const result = await this.plugin.feishuPublisher.testConnection();
+					const who = result.userName ? `（${result.userName}）` : '';
+					new Notice(`✅ 飞书 MCP 连接成功${who}，可用工具：${result.tools.join('、') || '无'}`, 8000);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					new Notice(`❌ 飞书 MCP 连接失败：${message}`, 8000);
+				} finally {
+					button.setDisabled(false).setButtonText('测试连接');
+				}
+			}));
+
+		urlSetting.addButton(button => button
+			.setButtonText('清除')
+			.setWarning()
+			.onClick(async () => {
+				this.plugin.secretStore.clear(FEISHU_MCP_URL_SECRET_ID);
+				this.plugin.settings.feishuMcpUrlSaved = false;
+				await this.plugin.saveSettings();
+				new Notice('已清除本机保存的飞书 MCP URL');
+				this.display();
+			}));
 	}
 
     private renderConfluenceSettings(containerEl: HTMLElement) {

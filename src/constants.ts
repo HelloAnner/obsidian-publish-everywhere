@@ -5,7 +5,7 @@
 import type { FeishuSettings } from './types';
 
 export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
-	feishuAuth: null,
+	feishuMcpUrlSaved: false,
 
 	frontMatterHandling: 'remove',
 	codeBlockFilterLanguages: [],
