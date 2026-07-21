@@ -17,43 +17,58 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 		this.renderConfluenceSettings(containerEl);
 		containerEl.createEl('hr');
 
-		// 飞书分享设置（基于飞书官方 MCP）
+		// 飞书分享设置（PersonalAgent + 用户 OAuth，直接调用 REST API）
 		containerEl.createEl('h2', { text: '飞书分享设置' });
 
 		const descEl = containerEl.createDiv('setting-item-description');
-		const p1 = descEl.createEl('p');
-		p1.textContent = '直接调用飞书官方 MCP 服务进行发布。';
-		const p2 = descEl.createEl('p');
-		p2.appendText('在 ');
-		const link = p2.createEl('a', { text: 'mcp.feishu.cn', href: 'https://mcp.feishu.cn' });
-		link.setAttr('target', '_blank');
-		p2.appendText(' 完成网页授权后，复制专属 MCP URL 粘贴到下方即可。');
+		descEl.createEl('p', {
+			text: '使用当前浏览器中的飞书账号进行个人授权。无需安装 CLI、配置企业机器人或填写 App Secret。首次连接可能连续打开两个飞书确认页面。'
+		});
 
-		new Setting(containerEl)
-			.setName('MCP URL')
-			.setDesc('飞书官方 MCP 入口（含个人 token），例如：https://mcp.feishu.cn/mcp/mcp_xxxxxxxx')
-			.addText(text => {
-				text.setPlaceholder('https://mcp.feishu.cn/mcp/...')
-					.setValue(this.plugin.settings.mcpUrl)
-					.onChange(async (value) => {
-						this.plugin.settings.mcpUrl = value.trim();
-						await this.plugin.saveSettings();
-					});
-				text.inputEl.type = 'password';
-				text.inputEl.style.width = '100%';
-			});
+		const authStatus = this.plugin.feishuAuth.getStatus();
+		const statusText = authStatus.connected
+			? `✅ 已连接：${authStatus.userName || '飞书用户'}`
+			: authStatus.hasPersonalApp
+				? '尚未授权文档访问；已保留个人连接，可直接继续授权'
+				: '尚未连接飞书';
+		const authSetting = new Setting(containerEl)
+			.setName('飞书个人授权')
+			.setDesc(statusText);
 
-		new Setting(containerEl)
-			.setName('标题来源')
-			.setDesc('文档标题取自文件名或 Front Matter 中的 title 字段')
-			.addDropdown(drop => drop
-				.addOption('filename', '文件名')
-				.addOption('frontmatter', 'Front Matter title')
-				.setValue(this.plugin.settings.titleSource)
-				.onChange(async (value: 'filename' | 'frontmatter') => {
-					this.plugin.settings.titleSource = value;
-					await this.plugin.saveSettings();
+		authSetting.addButton(button => button
+			.setButtonText(authStatus.connected ? '重新授权' : '连接飞书（个人授权）')
+			.setCta()
+			.onClick(async () => {
+				button.setDisabled(true).setButtonText('等待浏览器确认…');
+				try {
+					await this.plugin.feishuAuth.connect(message => authSetting.setDesc(message));
+					new Notice('✅ 飞书个人授权成功');
+					this.display();
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					authSetting.setDesc(`❌ ${message}`);
+					button.setDisabled(false).setButtonText(authStatus.connected ? '重新授权' : '重新连接');
+					new Notice(`❌ 飞书连接失败：${message}`, 8000);
+				}
+			}));
+
+		if (authStatus.connected) {
+			authSetting.addButton(button => button
+				.setButtonText('退出登录')
+				.onClick(async () => {
+					await this.plugin.feishuAuth.logout();
+					new Notice('已退出飞书登录；个人连接已保留');
+					this.display();
 				}));
+		}
+		authSetting.addButton(button => button
+			.setButtonText('重置连接')
+			.setWarning()
+			.onClick(async () => {
+				await this.plugin.feishuAuth.resetConnection();
+				new Notice('已清除本机飞书凭据');
+				this.display();
+			}));
 
 		new Setting(containerEl)
 			.setName('Front Matter 处理')
@@ -64,16 +79,6 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.frontMatterHandling)
 				.onChange(async (value: 'remove' | 'keep-as-code') => {
 					this.plugin.settings.frontMatterHandling = value;
-					await this.plugin.saveSettings();
-				}));
-
-		new Setting(containerEl)
-			.setName('在 Front Matter 中写入分享标记')
-			.setDesc('发布成功后自动写入 feishu_url 与 feishu_shared_at')
-			.addToggle(toggle => toggle
-				.setValue(this.plugin.settings.enableShareMarkInFrontMatter)
-				.onChange(async (value) => {
-					this.plugin.settings.enableShareMarkInFrontMatter = value;
 					await this.plugin.saveSettings();
 				}));
 
@@ -98,8 +103,9 @@ export class PublishEverywhereSettingTab extends PluginSettingTab {
 				}));
 
 		const tipEl = containerEl.createDiv('setting-item-description');
-		tipEl.createEl('p').textContent = '💡 在笔记 Front Matter 中写 `feishu: <wiki 链接>` 指定父节点；写 `feishu_url: <已有文档链接>` 则会更新该文档。';
-		tipEl.createEl('p').textContent = '⚠️ 通过 MCP 发布时，本地图片和附件会被替换为文字占位，仅保留 http(s) 网络图片。';
+		tipEl.createEl('p').textContent = '💡 发布逻辑与 KMS 一致：`feishu` 是 Wiki 父页面；优先更新 `feishu_url`，否则在父页面下按文件名匹配同名子页面，找不到才新建。';
+		tipEl.createEl('p').textContent = '💡 每次发布成功都会回填最新的 `feishu_url` 与 `feishu_shared_at`；文件改名后会同步更新飞书标题。';
+		tipEl.createEl('p').textContent = '⚠️ 为保持最小权限，本地图片和附件会替换为文字占位，仅保留 http(s) 网络图片。';
 
 		// Notion 设置部分
 		containerEl.createEl('hr');
@@ -330,7 +336,7 @@ private addRewardSection(containerEl: HTMLElement) {
 	qrImage.alt = '微信打赏二维码';
 
 	// 添加提示文字
-	const hintP = qrContainer.createEl('p', { text: '微信扫一扫，支持作者' });
+	qrContainer.createEl('p', { text: '微信扫一扫，支持作者' });
 }
 
 /**

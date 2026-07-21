@@ -5,12 +5,10 @@
 import type { FeishuSettings } from './types';
 
 export const DEFAULT_SETTINGS: Partial<FeishuSettings> = {
-	mcpUrl: '',
+	feishuAuth: null,
 
-	titleSource: 'filename',
 	frontMatterHandling: 'remove',
 	codeBlockFilterLanguages: [],
-	enableShareMarkInFrontMatter: true,
 	suppressShareNotices: false,
 	simpleSuccessNotice: false,
 	llmBaseUrl: '',

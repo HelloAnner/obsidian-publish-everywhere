@@ -1,11 +1,8 @@
+import type { FeishuAuthState } from './feishu/feishu-auth-types';
+
 /**
  * 飞书分享插件类型定义
  */
-
-/**
- * 文档标题来源选项
- */
-export type TitleSource = 'filename' | 'frontmatter';
 
 /**
  * Front Matter 处理方式选项
@@ -22,15 +19,12 @@ export interface NotionParentLocation {
 }
 
 export interface FeishuSettings extends AutomationSharedSettings {
-	// 飞书官方 MCP 服务地址（含用户 token），由用户在 https://mcp.feishu.cn 网页授权获得
-	mcpUrl: string;
+	// PersonalAgent + 用户 OAuth 状态；敏感字段由 Electron safeStorage 加密。
+	feishuAuth: FeishuAuthState | null;
 
-	titleSource: TitleSource;
 	frontMatterHandling: FrontMatterHandling;
 	// 代码块过滤（多选，命中则移除）
 	codeBlockFilterLanguages: string[];
-	// 分享标记设置
-	enableShareMarkInFrontMatter: boolean;
 	// 通知抑制设置（取消分享状态通知）
 	suppressShareNotices: boolean;
 	// 简洁成功通知（仅一行提示）
@@ -52,6 +46,7 @@ export interface ShareResult {
 	url?: string;
 	title?: string;
 	error?: string;
+	operation?: 'created' | 'updated';
 	sourceFileToken?: string; // 源文件token，用于临时文档清理
 }
 

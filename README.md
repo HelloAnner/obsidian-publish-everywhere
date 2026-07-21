@@ -18,6 +18,12 @@ URL 选择： https://kms.fineres.com
 
 用户名和密码配置好即可；
 
+### 3.1 飞书个人授权
+
+在插件设置的“飞书分享设置”中点击 **连接飞书（个人授权）**。插件会自动打开系统浏览器，首次连接可能需要依次确认个人连接和文档权限。无需安装 CLI、配置企业机器人、复制 MCP URL 或填写 App Secret。
+
+飞书仅申请创建、读取、更新文档以及读取 Wiki 子节点所需的最小权限，Token 和个人 App Secret 使用 Electron safeStorage 加密保存在本机。
+
 ## 4 使用
 
 ### 4.1 步骤一： 添加父页面 kms 链接属性
@@ -40,6 +46,16 @@ URL 选择： https://kms.fineres.com
 如果对应的父页面下存在相同名称的页面，会直接按照最新的文档内容全文覆盖式更新。
 
 发布成功后， 自动回填 kms_url 属性 （发布后的页面的 url）
+
+### 4.4 发布到飞书
+
+在笔记属性中填写：
+
+```yaml
+feishu: https://your-tenant.feishu.cn/wiki/父页面Token
+```
+
+发布状态机与 KMS 一致：优先更新 `feishu_url` 指向的子页面；没有有效 `feishu_url` 时，在 `feishu` 父页面下按当前文件名查找同名子页面；找不到才新建。发布成功后始终回填 `feishu_url` 和 `feishu_shared_at`。文件改名后再次发布，会更新原页面标题。
 
 ## 5 功能介绍
 
