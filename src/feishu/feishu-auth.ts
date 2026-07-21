@@ -1,4 +1,4 @@
-import { requestUrl } from 'obsidian';
+import { requestUrl, SecretStorage } from 'obsidian';
 import { FeishuCredentialStore } from './feishu-credential-store';
 import { FEISHU_ENDPOINTS, FEISHU_PUBLISH_SCOPES } from './feishu-endpoints';
 import {
@@ -42,6 +42,8 @@ interface DeviceTokenResult {
 interface FeishuAuthServiceOptions {
 	getState: () => FeishuAuthState | null | undefined;
 	saveState: (state: FeishuAuthState | null) => Promise<void>;
+	/** Obsidian app.secretStorage; undefined on Obsidian < 1.11.4. */
+	getSecretStorage: () => SecretStorage | null | undefined;
 }
 
 /**
@@ -49,7 +51,7 @@ interface FeishuAuthServiceOptions {
  * MIT-licensed larksuite/cli authentication flow. No CLI process or MCP is used.
  */
 export class FeishuAuthService {
-	private readonly credentialStore = new FeishuCredentialStore();
+	private readonly credentialStore: FeishuCredentialStore;
 	private readonly getStateValue: () => FeishuAuthState | null | undefined;
 	private readonly saveStateValue: (state: FeishuAuthState | null) => Promise<void>;
 	private connectPromise: Promise<FeishuConnectionStatus> | null = null;
@@ -59,6 +61,7 @@ export class FeishuAuthService {
 	constructor(options: FeishuAuthServiceOptions) {
 		this.getStateValue = options.getState;
 		this.saveStateValue = options.saveState;
+		this.credentialStore = new FeishuCredentialStore(options.getSecretStorage);
 	}
 
 	getStatus(): FeishuConnectionStatus {
@@ -113,6 +116,7 @@ export class FeishuAuthService {
 
 	async resetConnection(): Promise<void> {
 		this.cancelPendingOperations();
+		this.credentialStore.clear();
 		await this.saveStateValue(null);
 	}
 

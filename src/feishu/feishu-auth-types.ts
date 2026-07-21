@@ -13,7 +13,7 @@ export interface FeishuAuthState {
 	connectedAt?: number;
 }
 
-/** Secrets encrypted with Electron safeStorage before they are persisted. */
+/** Secrets kept in Obsidian's secretStorage; data.json only stores a marker. */
 export interface FeishuSecretBundle {
 	appSecret: string;
 	accessToken?: string;

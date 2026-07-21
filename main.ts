@@ -62,6 +62,7 @@ export default class PublishEverywherePlugin extends Plugin {
 				this.settings.feishuAuth = state;
 				await this.saveSettings();
 			},
+			getSecretStorage: () => this.app.secretStorage,
 		});
 		this.feishuPublisher = new FeishuRestPublisher(
 			this.app,
